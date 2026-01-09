@@ -47,7 +47,6 @@
 #include "soc/gpio_reg.h"
 #include "driver/gpio.h"
 #include "CkpGenerator.h"
-#include "ui_lvgl.h"
 
 // ==========================================================
 // Forward declarations (for IntelliSense / C++ compilation)
@@ -62,15 +61,13 @@ static void printPatterns();              // prints pattern list
 static void printStatus();                // prints current config/state
 static void printPrompt();                // prints CLI prompt
 static void pollSerialForDemo();          // simple CLI while GUI not integrated
-static void on_ui_rpm(uint32_t rpm);      // UI callback for RPM
-static void on_ui_pattern(uint8_t idx);   // UI callback for pattern
 void managerTask(void*);                  // FreeRTOS manager task (Core 1)
 void setup();                             // Arduino lifecycle
 void loop();                              // Arduino lifecycle
 
 // -------------------- Pins --------------------
-#define PIN_CKP_OUT        17    // CKP output
-#define PIN_CAPTURE_IN     18   // Capture input (GPIO 16)
+#define PIN_CKP_OUT        5    // CKP output
+#define PIN_CAPTURE_IN     16   // Capture input (GPIO 16)
 
 // -------------------- Debug -------------------
 #define DEBUG 1
@@ -392,22 +389,6 @@ struct CtrlMsg {
 
 QueueHandle_t gCtrlQ = nullptr;
 
-static void on_ui_rpm(uint32_t rpm) {
-  if (!gCtrlQ) return;
-  CtrlMsg m;
-  m.type = MSG_SET_RPM;
-  m.payload.val = (int32_t)rpm;
-  xQueueSend(gCtrlQ, &m, 0);
-}
-
-static void on_ui_pattern(uint8_t idx) {
-  if (!gCtrlQ) return;
-  CtrlMsg m;
-  m.type = MSG_SET_PATTERN;
-  m.payload.val = (int32_t)idx;
-  xQueueSend(gCtrlQ, &m, 0);
-}
-
 // Pre-defined patterns remain the same.
 static inline SignalConfig patternFromIndex(uint8_t idx, uint32_t rpmCurrent) {
   // Default: A standard 60-2 pattern with a LOW gap at the END.
@@ -691,8 +672,6 @@ void setup() {
   gCtrlQ = xQueueCreate(16, sizeof(CtrlMsg));
   xTaskCreatePinnedToCore(managerTask, "managerTask", 4096, nullptr, 3, nullptr, 1);
 
-  ui_init(on_ui_rpm, on_ui_pattern);
-
   // Apply the default configuration and start the generator.
   genTX.apply(gCfg);
   genTX.start();
@@ -701,9 +680,6 @@ void setup() {
 void loop() {
   // Check for new user commands from the serial monitor.
   pollSerialForDemo();
-
-  // Service LVGL.
-  ui_task_handler();
 
   // The capture logic can remain, as it doesn't print anything.
   // It simply fetches data into variables if a signal is present on the input pin.
