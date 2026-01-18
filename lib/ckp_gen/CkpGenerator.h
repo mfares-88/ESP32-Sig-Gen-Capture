@@ -24,10 +24,13 @@ struct SignalConfig {
   bool        gapLvl;    // gap level (false=LOW, true=HIGH)
 };
 
+// Validate basic config sanity (does not clamp).
+bool validateSignalConfig(const SignalConfig& cfg);
+
 // Simple generator interface for modular use
 struct IGenerator {
-  virtual void begin(int pin) = 0;
-  virtual void apply(const SignalConfig& cfg) = 0;
+  virtual bool begin(int pin) = 0;
+  virtual bool apply(const SignalConfig& cfg) = 0;
   virtual void start() = 0;
   virtual void stop() = 0;
   virtual ~IGenerator() = default;
@@ -38,8 +41,8 @@ class TimerCkpGenerator : public IGenerator {
 public:
   TimerCkpGenerator();
 
-  void begin(int pin) override;
-  void apply(const SignalConfig& cfg) override;
+  bool begin(int pin) override;
+  bool apply(const SignalConfig& cfg) override;
   void start() override;
   void stop() override;
 
@@ -66,12 +69,15 @@ private:
   volatile GapPosition _gapPos;
   volatile bool        _gapLvl;
 
+  // Precomputed ISR helpers
+  volatile uint32_t _gapStartSip;
+
   // State
-  volatile uint32_t _tick;
   volatile bool     _running;
   volatile bool     _pinHigh;
   volatile uint32_t _slotInPeriod;
   volatile bool     _gapWindow;
+
 
   portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
   static TimerCkpGenerator* s_inst;

@@ -18,22 +18,50 @@ TimerCkpGenerator::TimerCkpGenerator()
   : _pin(-1), _timer(nullptr),
     _slotPeriod_us(500), _slotsPerRev(120), _slotsPerPeriod(120),
     _gapSlots(4), _gapPos(GAP_AT_END), _gapLvl(false),
-    _tick(0), _running(false), _pinHigh(false),
+    _gapStartSip(0),
+    _running(false), _pinHigh(false),
     _slotInPeriod(0), _gapWindow(false) {}
 
-void TimerCkpGenerator::begin(int pin) {
+
+bool TimerCkpGenerator::begin(int pin) {
   _pin = pin;
   pinMode(_pin, OUTPUT);
   writeLow();
 
   // 1 MHz base (1 tick = 1 us)
   _timer = timerBegin(1000000);
+  if (!_timer) {
+    CKPDBG_PRINTLN("[CKP] timerBegin() failed");
+    return false;
+  }
+
   timerAttachInterrupt(_timer, &TimerCkpGenerator::onTimerStatic);
   s_inst = this;
+  return true;
 }
 
-void TimerCkpGenerator::apply(const SignalConfig& cfg) {
-  if (cfg.nTeeth == 0 || cfg.rpm == 0 || cfg.pMiss == 0) return;
+
+bool validateSignalConfig(const SignalConfig& cfg) {
+  if (cfg.rpm < 100u || cfg.rpm > 6000u) return false;
+  if (cfg.nTeeth == 0) return false;
+  if (cfg.pMiss == 0) return false;
+  if (cfg.nMiss == 0) return false;
+  if (cfg.nMiss >= cfg.nTeeth) return false;
+
+  const uint32_t slotsPerRev = 2u * (uint32_t)cfg.nTeeth;
+  const uint32_t slotsPerPeriod = (cfg.pMiss > 0) ? (slotsPerRev / cfg.pMiss) : 0;
+  if (slotsPerPeriod == 0) return false;
+  if ((slotsPerRev % cfg.pMiss) != 0) return false;
+
+  const uint32_t gapSlots = 2u * (uint32_t)cfg.nMiss;
+  if (gapSlots >= slotsPerPeriod) return false;
+
+  return true;
+}
+
+bool TimerCkpGenerator::apply(const SignalConfig& cfg) {
+  if (!validateSignalConfig(cfg)) return false;
+
 
   uint32_t slotsPerRev    = 2u * cfg.nTeeth;
   uint32_t slotsPerPeriod = slotsPerRev / cfg.pMiss;
@@ -49,9 +77,10 @@ void TimerCkpGenerator::apply(const SignalConfig& cfg) {
   _slotPeriod_us  = slot_us ? slot_us : 1;
   _gapPos         = cfg.gapPos;
   _gapLvl         = cfg.gapLvl;
-  _tick = 0;
+  _gapStartSip    = (_gapPos == GAP_AT_END) ? (_slotsPerPeriod - _gapSlots) : 0;
   _pinHigh = false;
   _slotInPeriod = 0;
+
   _gapWindow = false;
   writeLow();
   portEXIT_CRITICAL(&_mux);
@@ -64,15 +93,18 @@ void TimerCkpGenerator::apply(const SignalConfig& cfg) {
                 cfg.rpm, cfg.nTeeth, cfg.nMiss, cfg.pMiss,
                 _gapPos == GAP_AT_END ? "END" : "START",
                 _gapLvl ? "HIGH" : "LOW");
+
+  return true;
 }
 
 void TimerCkpGenerator::start() {
   if (!_timer) return;
   portENTER_CRITICAL(&_mux);
-  _tick = 0; _pinHigh = false; _running = true;
+  _pinHigh = false; _running = true;
   _slotInPeriod = 0; _gapWindow = false;
   writeLow();
   portEXIT_CRITICAL(&_mux);
+
   timerAlarm(_timer, _slotPeriod_us, true, 0);
   CKPDBG_PRINTLN("[CKP] generator START");
 }
@@ -109,31 +141,27 @@ void TimerCkpGenerator::onTimer() {
   portENTER_CRITICAL_ISR(&_mux);
   if (!_running) { portEXIT_CRITICAL_ISR(&_mux); return; }
 
-  if (_tick == _slotsPerRev-1) _tick = 0;
-
-  uint32_t sip = _tick % _slotsPerPeriod;
-  _slotInPeriod = sip;
+  const uint32_t sip = _slotInPeriod;
+  uint32_t nextSip = sip + 1;
+  if (nextSip >= _slotsPerPeriod) nextSip = 0;
+  _slotInPeriod = nextSip;
 
   bool level;
   bool in_gap;
 
   if (_gapPos == GAP_AT_END) {
-    in_gap = (sip >= (_slotsPerPeriod - _gapSlots));
+    in_gap = (sip >= _gapStartSip);
     if (in_gap) {
       level = _gapLvl;
     } else {
-      if(!_gapLvl){
-        level = ((sip & 1u) == 0u);
-      } else {
-        level = ((sip & 1u) == 1u);
-      }
+      level = ((sip & 1u) == (_gapLvl ? 1u : 0u));
     }
   } else { // GAP_AT_START
     in_gap = (sip < _gapSlots);
     if (in_gap) {
       level = _gapLvl;
     } else {
-      uint32_t tooth_sip = sip - _gapSlots;
+      const uint32_t tooth_sip = sip - _gapSlots;
       level = (((tooth_sip & 1u) == 0u) != _gapLvl);
     }
   }
@@ -142,7 +170,7 @@ void TimerCkpGenerator::onTimer() {
     writePin(level);
   }
   _gapWindow = in_gap;
-  _tick = _tick + 1;
+
   portEXIT_CRITICAL_ISR(&_mux);
 }
 
