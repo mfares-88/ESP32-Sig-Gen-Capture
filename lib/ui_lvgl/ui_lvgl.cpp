@@ -33,6 +33,7 @@ static ui_on_rpm_cb     s_on_rpm = nullptr;
 static ui_on_pattern_cb s_on_pattern = nullptr;
 static ui_on_run_cb     s_on_run = nullptr;
 static ui_on_custom_cb  s_on_custom = nullptr;
+static ui_on_invert_cb  s_on_invert = nullptr;
 
 
 // ---- LVGL objects ----
@@ -45,6 +46,8 @@ static lv_obj_t* lbl_pattern = nullptr;
 static lv_obj_t* dd_patterns = nullptr;
 static lv_obj_t* btn_run = nullptr;
 static lv_obj_t* lbl_run = nullptr;
+static lv_obj_t* btn_invert = nullptr;
+static lv_obj_t* lbl_invert = nullptr;
 static lv_obj_t* lbl_error = nullptr;
 
 // ---- Custom pattern modal ----
@@ -76,14 +79,18 @@ static volatile bool s_pending_pattern = false;
 static volatile uint8_t s_pending_pattern_val = 0;
 static volatile bool s_pending_running = false;
 static volatile bool s_pending_running_val = false;
+static volatile bool s_pending_inverted = false;
+static volatile bool s_pending_inverted_val = false;
 static volatile bool s_pending_error = false;
 static char s_pending_error_msg[96];
 
 static bool s_suppress_rpm_cb = false;
 static bool s_suppress_pattern_cb = false;
 static bool s_suppress_run_cb = false;
+static bool s_suppress_invert_cb = false;
 
 static bool s_running = true;
+static bool s_inverted = false;
 static uint32_t s_rpm_flash_until_ms = 0;
 
 
@@ -103,6 +110,9 @@ static void on_arc_changed(lv_event_t* e);
 static void on_pattern_changed(lv_event_t* e);
 static void on_pattern_open(lv_event_t* e);
 static void on_run_clicked(lv_event_t* e);
+static void on_invert_clicked(lv_event_t* e);
+static void refresh_run_label();
+static void refresh_invert_label();
 static void update_rpm_label(int32_t rpm);
 static void apply_pending_updates();
 
@@ -528,6 +538,15 @@ static void create_main_screen() {
   lv_label_set_text(lbl_run, s_running ? "STOP" : "START");
   lv_obj_center(lbl_run);
 
+  btn_invert = lv_btn_create(screen_main);
+  lv_obj_set_size(btn_invert, 160, 44);
+  lv_obj_align_to(btn_invert, btn_run, LV_ALIGN_OUT_TOP_MID, 0, -10);
+  lv_obj_add_event_cb(btn_invert, on_invert_clicked, LV_EVENT_CLICKED, NULL);
+
+  lbl_invert = lv_label_create(btn_invert);
+  refresh_invert_label();
+  lv_obj_center(lbl_invert);
+
   lbl_error = lv_label_create(screen_main);
   lv_obj_add_style(lbl_error, &style_caption, 0);
   lv_label_set_text(lbl_error, "");
@@ -581,6 +600,11 @@ static void refresh_run_label() {
   lv_label_set_text(lbl_run, s_running ? "STOP" : "START");
 }
 
+static void refresh_invert_label() {
+  if (!lbl_invert) return;
+  lv_label_set_text(lbl_invert, s_inverted ? "INVERT ON" : "INVERT OFF");
+}
+
 static void on_run_clicked(lv_event_t* e) {
   LV_UNUSED(e);
   if (s_suppress_run_cb) return;
@@ -591,11 +615,22 @@ static void on_run_clicked(lv_event_t* e) {
   if (s_on_run) s_on_run(s_running);
 }
 
-bool ui_init(ui_on_rpm_cb on_rpm, ui_on_pattern_cb on_pattern, ui_on_run_cb on_run, ui_on_custom_cb on_custom) {
+static void on_invert_clicked(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (s_suppress_invert_cb) return;
+
+  s_inverted = !s_inverted;
+  refresh_invert_label();
+
+  if (s_on_invert) s_on_invert(s_inverted);
+}
+
+bool ui_init(ui_on_rpm_cb on_rpm, ui_on_pattern_cb on_pattern, ui_on_run_cb on_run, ui_on_custom_cb on_custom, ui_on_invert_cb on_invert) {
   s_on_rpm = on_rpm;
   s_on_pattern = on_pattern;
   s_on_run = on_run;
   s_on_custom = on_custom;
+  s_on_invert = on_invert;
   if (s_lvgl_ready) return true;
 
 
@@ -687,6 +722,13 @@ void ui_update_running(bool running) {
   portEXIT_CRITICAL(&s_ui_mux);
 }
 
+void ui_update_inverted(bool inverted) {
+  portENTER_CRITICAL(&s_ui_mux);
+  s_pending_inverted_val = inverted;
+  s_pending_inverted = true;
+  portEXIT_CRITICAL(&s_ui_mux);
+}
+
 void ui_show_error(const char* msg) {
   portENTER_CRITICAL(&s_ui_mux);
   strncpy(s_pending_error_msg, msg ? msg : "", sizeof(s_pending_error_msg));
@@ -702,6 +744,8 @@ static void apply_pending_updates() {
   uint8_t pattern = 0;
   bool hasRunning = false;
   bool running = false;
+  bool hasInverted = false;
+  bool inverted = false;
   bool hasError = false;
   char errorMsg[sizeof(s_pending_error_msg)];
 
@@ -709,6 +753,7 @@ static void apply_pending_updates() {
   if (s_pending_rpm) { hasRpm = true; rpm = s_pending_rpm_val; s_pending_rpm = false; }
   if (s_pending_pattern) { hasPattern = true; pattern = s_pending_pattern_val; s_pending_pattern = false; }
   if (s_pending_running) { hasRunning = true; running = s_pending_running_val; s_pending_running = false; }
+  if (s_pending_inverted) { hasInverted = true; inverted = s_pending_inverted_val; s_pending_inverted = false; }
   if (s_pending_error) {
     hasError = true;
     strncpy(errorMsg, s_pending_error_msg, sizeof(errorMsg));
@@ -745,6 +790,13 @@ static void apply_pending_updates() {
     s_suppress_run_cb = false;
   }
 
+  if (hasInverted) {
+    s_suppress_invert_cb = true;
+    s_inverted = inverted;
+    refresh_invert_label();
+    s_suppress_invert_cb = false;
+  }
+
   if (hasError && lbl_error) {
     if (errorMsg[0] == '\0') {
       lv_obj_add_flag(lbl_error, LV_OBJ_FLAG_HIDDEN);
@@ -765,4 +817,3 @@ void ui_task_handler() {
   lv_timer_handler();
   apply_pending_updates();
 }
-

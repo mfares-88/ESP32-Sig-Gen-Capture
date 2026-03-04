@@ -18,7 +18,7 @@ TimerCkpGenerator::TimerCkpGenerator()
   : _pin(-1), _timer(nullptr),
     _slotPeriod_us(500), _slotsPerRev(120), _slotsPerPeriod(120),
     _gapSlots(4), _gapPos(GAP_AT_END), _gapLvl(false),
-    _gapStartSip(0),
+    _gapStartSip(0), _invertOutput(false),
     _running(false), _pinHigh(false),
     _slotInPeriod(0), _gapWindow(false) {}
 
@@ -97,6 +97,25 @@ bool TimerCkpGenerator::apply(const SignalConfig& cfg) {
   return true;
 }
 
+void TimerCkpGenerator::setInverted(bool inverted) {
+  portENTER_CRITICAL(&_mux);
+  if (_invertOutput != inverted) {
+    _invertOutput = inverted;
+    if (_running) {
+      writePin(!_pinHigh);
+    }
+  }
+  portEXIT_CRITICAL(&_mux);
+}
+
+bool TimerCkpGenerator::isInverted() {
+  bool v;
+  portENTER_CRITICAL(&_mux);
+  v = _invertOutput;
+  portEXIT_CRITICAL(&_mux);
+  return v;
+}
+
 void TimerCkpGenerator::start() {
   if (!_timer) return;
   portENTER_CRITICAL(&_mux);
@@ -164,6 +183,10 @@ void TimerCkpGenerator::onTimer() {
       const uint32_t tooth_sip = sip - _gapSlots;
       level = (((tooth_sip & 1u) == 0u) != _gapLvl);
     }
+  }
+
+  if (_invertOutput) {
+    level = !level;
   }
 
   if (level != _pinHigh) {

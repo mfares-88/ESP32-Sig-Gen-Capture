@@ -33,7 +33,7 @@
 // Control / Manager (Core 1)
 // =====================================================
 
-enum MsgType : uint8_t { MSG_SET_RPM, MSG_SET_PATTERN, MSG_START, MSG_STOP, MSG_SET_CUSTOM };
+enum MsgType : uint8_t { MSG_SET_RPM, MSG_SET_PATTERN, MSG_START, MSG_STOP, MSG_SET_CUSTOM, MSG_SET_INVERT };
 
 union MsgPayload {
   int32_t      val;
@@ -62,6 +62,7 @@ static EdgePulseCapture  capRX;
 static SignalConfig gCfg{1000, 60, 1, 2, GAP_AT_END, false};
 static uint8_t gPatternIdx = 0;
 static volatile bool gRunning = true;
+static volatile bool gInverted = false;
 
 static inline SignalConfig patternFromIndex(uint8_t idx, uint32_t rpmCurrent) {
   SignalConfig c{rpmCurrent, 60, 1, 2, GAP_AT_END, false};
@@ -125,6 +126,16 @@ static void on_ui_custom(const SignalConfig& cfg) {
     ui_update_rpm(gCfg.rpm);
     ui_update_pattern(gPatternIdx);
     ui_update_running(gRunning);
+  }
+}
+
+static void on_ui_invert(bool inverted) {
+  CtrlMsg m{};
+  m.type = MSG_SET_INVERT;
+  m.payload.val = inverted ? 1 : 0;
+  if (!sendCtrlMsg(m)) {
+    ui_show_error("Control queue full");
+    ui_update_inverted(gInverted);
   }
 }
 
@@ -208,6 +219,15 @@ void managerTask(void*) {
         gRunning = false;
         ui_update_running(false);
         break;
+
+      case MSG_SET_INVERT: {
+        const bool requested = (m.payload.val != 0);
+        genTX.setInverted(requested);
+        gInverted = requested;
+        ui_update_inverted(gInverted);
+        ui_show_error("");
+        break;
+      }
     }
   }
 }
@@ -230,7 +250,7 @@ void setup() {
     DBG_PRINTLN("[CAP] queue/interrupt init failed");
   }
 
-  const bool uiOk = ui_init(on_ui_rpm, on_ui_pattern, on_ui_run, on_ui_custom);
+  const bool uiOk = ui_init(on_ui_rpm, on_ui_pattern, on_ui_run, on_ui_custom, on_ui_invert);
   if (!uiOk) {
     DBG_PRINTLN("[UI] init failed; running defaults only");
   }
@@ -255,6 +275,7 @@ void setup() {
   ui_update_rpm(gCfg.rpm);
   ui_update_pattern(gPatternIdx);
   ui_update_running(true);
+  ui_update_inverted(gInverted);
 }
 
 void loop() {

@@ -31,6 +31,8 @@ bool validateSignalConfig(const SignalConfig& cfg);
 struct IGenerator {
   virtual bool begin(int pin) = 0;
   virtual bool apply(const SignalConfig& cfg) = 0;
+  virtual void setInverted(bool inverted) = 0;
+  virtual bool isInverted() = 0;
   virtual void start() = 0;
   virtual void stop() = 0;
   virtual ~IGenerator() = default;
@@ -43,6 +45,8 @@ public:
 
   bool begin(int pin) override;
   bool apply(const SignalConfig& cfg) override;
+  void setInverted(bool inverted) override;
+  bool isInverted() override;
   void start() override;
   void stop() override;
 
@@ -71,6 +75,7 @@ private:
 
   // Precomputed ISR helpers
   volatile uint32_t _gapStartSip;
+  volatile bool _invertOutput;
 
   // State
   volatile bool     _running;
