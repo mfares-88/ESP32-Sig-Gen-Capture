@@ -1,0 +1,26 @@
+.pio/build/esp32-s3-n4r8/lib8ab/lvgl/draw/convert/lv_draw_buf_convert.c.o: \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/lv_draw_buf_convert.c \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/lv_draw_buf_convert.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_color.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/../lv_conf_internal.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/../lv_conf_kconfig.h \
+ C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/include/sdkconfig.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/lv_conf.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_assert.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_log.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_types.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/../stdlib/lv_mem.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/../stdlib/../lv_conf_internal.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/../stdlib/lv_string.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/../stdlib/../misc/lv_types.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_math.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_palette.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_color.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_color_op.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../lv_draw_buf.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_types.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_area.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../misc/lv_color.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../stdlib/lv_string.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../lv_image_dsc.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/draw/convert/../../lv_conf_internal.h

@@ -1,0 +1,30 @@
+.pio/build/esp32-s3-n4r8/lib8ab/lvgl/drivers/display/ili9341/lv_ili9341.c.o: \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/lv_ili9341.c \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/lv_ili9341.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/lv_lcd_generic_mipi.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/lv_display.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_types.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/../lv_conf_internal.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/../lv_conf_kconfig.h \
+ C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/include/sdkconfig.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/lv_conf.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_timer.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/../tick/lv_tick.h \
+ C:/Truck_Tester/ESP32_Sig_Gen_Capture/ESP32_Sig_Gen_Capture/.pio/libdeps/esp32-s3-n4r8/lvgl/src/lv_conf_internal.h \
+ C:/Truck_Tester/ESP32_Sig_Gen_Capture/ESP32_Sig_Gen_Capture/.pio/libdeps/esp32-s3-n4r8/lvgl/src/misc/lv_types.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_types.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_ll.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_event.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_array.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_color.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_assert.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_log.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/../stdlib/lv_mem.h \
+ C:/Truck_Tester/ESP32_Sig_Gen_Capture/ESP32_Sig_Gen_Capture/.pio/libdeps/esp32-s3-n4r8/lvgl/src/lv_conf_internal.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/../stdlib/lv_string.h \
+ C:/Truck_Tester/ESP32_Sig_Gen_Capture/ESP32_Sig_Gen_Capture/.pio/libdeps/esp32-s3-n4r8/lvgl/src/misc/lv_types.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_math.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_palette.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_color.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_color_op.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ili9341/../lcd/../../../display/../misc/lv_area.h
