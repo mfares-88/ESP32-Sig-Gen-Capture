@@ -1,0 +1,8 @@
+.pio/build/esp32-s3-n4r8/lib70e/lvgl/drivers/display/ft81x/lv_ft81x.c.o: \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ft81x/lv_ft81x.c \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ft81x/lv_ft81x.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ft81x/../../../lv_conf_internal.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/drivers/display/ft81x/../../../lv_conf_kconfig.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/include/sdkconfig.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_attr.h \
+ include/lv_conf.h

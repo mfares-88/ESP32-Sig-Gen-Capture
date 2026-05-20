@@ -1,11 +1,19 @@
 .pio/build/esp32-s3-n4r8/FrameworkArduino/MD5Builder.cpp.o: \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/MD5Builder.cpp \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/HEXBuilder.h \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/WString.h \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/pgmspace.h \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/Stream.h \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/WString.h \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/Printable.h \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/MD5Builder.h \
- C:/Users/mahmo/.platformio/packages/framework-arduinoespressif32/cores/esp32/HashBuilder.h
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/MD5Builder.cpp \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/HEXBuilder.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/WString.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/pgmspace.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/Stream.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/newlib/platform_include/stdio.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/WString.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/Printable.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/MD5Builder.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_system/include/esp_system.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_err.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_compiler.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_attr.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_bit_defs.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_idf_version.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_rom/include/esp_rom_md5.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/HashBuilder.h
