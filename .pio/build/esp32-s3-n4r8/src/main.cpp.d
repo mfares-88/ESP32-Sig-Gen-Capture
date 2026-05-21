@@ -169,8 +169,14 @@
  /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h \
- lib/ckp_gen/CkpGenerator.h lib/ckp_capture/EdgePulseCapture.h \
- lib/ui_lvgl/ui_lvgl.h .pio/libdeps/esp32-s3-n4r8/lvgl/lvgl.h \
+ lib/ckp_gen/CkpGenerator.h lib/ckp_gen/PatternRef.h \
+ lib/ckp_capture/EdgePulseCapture.h lib/sweep_compression/LittleFSInit.h \
+ lib/patterns/PatternLibrary.h lib/sweep_compression/NvsStore.h \
+ lib/sweep_compression/SweepCompression.h \
+ lib/sweep_compression/PatternStorage.h lib/dsl/Dsl.h \
+ lib/ui_lvgl/ctrl_msg.h lib/ui_lvgl/serial_cli.h \
+ lib/ckp_capture/CaptureRecorder.h lib/ui_lvgl/ui_lvgl.h \
+ .pio/libdeps/esp32-s3-n4r8/lvgl/lvgl.h \
  .pio/libdeps/esp32-s3-n4r8/lvgl/lv_version.h \
  .pio/libdeps/esp32-s3-n4r8/lvgl/src/lv_init.h \
  .pio/libdeps/esp32-s3-n4r8/lvgl/src/lv_conf_internal.h \
@@ -616,4 +622,8 @@
  .pio/libdeps/esp32-s3-n4r8/lvgl/src/lv_api_map_v9_1.h \
  .pio/libdeps/esp32-s3-n4r8/lvgl/src/lv_api_map_v9_2.h \
  .pio/libdeps/esp32-s3-n4r8/lvgl/src/lv_api_map_v9_3.h \
- .pio/libdeps/esp32-s3-n4r8/lvgl/src/lv_api_map_v9_4.h
+ .pio/libdeps/esp32-s3-n4r8/lvgl/src/lv_api_map_v9_4.h \
+ lib/ckp_gen/TableCkpGenerator.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_driver_gptimer/include/driver/gptimer.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_driver_gptimer/include/driver/gptimer_etm.h \
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_driver_gpio/include/driver/dedic_gpio.h

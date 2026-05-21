@@ -1,8 +1,22 @@
 // LVGL v9 UI + display/touch port for JC4827W543 (ESP32-S3)
+//
+// Phase 4..7 / 9 (Agent E): adds channel-state LEDs (M2.3), the full
+// 64-pattern scrollable dropdown with search (M3.4), Sweep / Compression
+// tabs (M4.5), DSL editor modal (M5.7), Capture page (M6), and the 3-lane
+// waveform canvas (M7). All cross-core updates continue to use the
+// existing pending-flag pattern (s_ui_mux) — no new sync mechanism.
+//
+// This TU is gated on SIGGEN_HAS_DISPLAY so the WROOM (headless) build
+// can skip LVGL entirely. PlatformIO's lib-dep finder still scans this
+// folder for `ctrl_msg.h`/`serial_cli.{h,cpp}`, hence the file-level
+// guard rather than a build_src_filter.
+#if defined(SIGGEN_HAS_DISPLAY)
+
 #include "ui_lvgl.h"
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <ctype.h>
 #include <esp_heap_caps.h>
 #include <Arduino_GFX_Library.h>
 #include <PINS_JC4827W543.h>
@@ -12,6 +26,13 @@
 #include "freertos/portmacro.h"
 
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "PatternLibrary.h"
+#include "PatternStorage.h"
+#include "SweepCompression.h"
+#include "ctrl_msg.h"
 
 
 // Touch controller configuration (GT911)
@@ -50,6 +71,62 @@ static lv_obj_t* btn_invert = nullptr;
 static lv_obj_t* lbl_invert = nullptr;
 static lv_obj_t* lbl_error = nullptr;
 
+// M2.3: channel LEDs (crank, cam1, cam2)
+static lv_obj_t* led_crank = nullptr;
+static lv_obj_t* led_cam1  = nullptr;
+static lv_obj_t* led_cam2  = nullptr;
+// Cached visible state to avoid redundant style updates
+static uint8_t s_visible_channel_mask = 0x01;
+static uint8_t s_visible_invert_mask  = 0x00;
+
+// M3.4: 64-pattern dropdown — we substitute lv_dropdown's "options"
+// string with all builtin patterns, prefixed by category section
+// markers. The mapping s_pattern_dd_to_builtin[] resolves a dropdown
+// selection (incl. section-marker offsets we skip via re-selection
+// logic) to a PatternLibrary::builtinByIndex(...) index. We hold up to
+// 128 entries to leave room for user patterns later.
+#define UI_PATTERN_DD_CAP 128
+static int16_t s_pattern_dd_to_builtin[UI_PATTERN_DD_CAP];
+static uint8_t s_pattern_dd_entry_count = 0;
+static lv_obj_t* ta_pattern_filter = nullptr;
+static char s_pattern_filter[32] = {0};
+
+// M4.5: Sweep + compression panels (modals).
+static lv_obj_t* overlay_sweep = nullptr;
+static lv_obj_t* spin_sweep_low = nullptr;
+static lv_obj_t* spin_sweep_high = nullptr;
+static lv_obj_t* dd_sweep_mode  = nullptr;
+static lv_obj_t* spin_sweep_iv  = nullptr;
+static lv_obj_t* lbl_sweep_live = nullptr;
+static lv_timer_t* tmr_sweep_live = nullptr;
+
+static lv_obj_t* overlay_comp = nullptr;
+static lv_obj_t* sw_comp_en   = nullptr;
+static lv_obj_t* spin_comp_cyl = nullptr;
+static lv_obj_t* spin_comp_thr = nullptr;
+static lv_obj_t* spin_comp_peak = nullptr;
+static lv_obj_t* sw_comp_dyn   = nullptr;
+
+// M5.7: DSL editor modal.
+static lv_obj_t* overlay_dsl = nullptr;
+static lv_obj_t* ta_dsl_src  = nullptr;
+static lv_obj_t* lbl_dsl_err = nullptr;
+static lv_timer_t* tmr_dsl_err = nullptr;
+
+// M7: waveform canvas.
+static lv_obj_t*   overlay_wave   = nullptr;
+static lv_obj_t*   canvas_wave    = nullptr;
+static lv_color_t* canvas_wave_buf = nullptr;
+static lv_timer_t* tmr_wave        = nullptr;
+static int         s_wave_zoom    = 1;     // pixels per slot
+static uint8_t     s_wave_lane_mask = 0x07; // bit0..2: lane visibility
+
+// Cross-TU hooks (defined in main.cpp).
+extern volatile char g_dsl_error[];
+// All globals below are declared in NvsStore.h (we include it transitively
+// via ctrl_msg.h? — actually we don't; pull NvsStore directly):
+#include "NvsStore.h"
+
 // ---- Custom pattern modal ----
 static lv_obj_t* overlay_custom = nullptr;
 static lv_obj_t* panel_custom = nullptr;
@@ -83,6 +160,13 @@ static volatile bool s_pending_inverted = false;
 static volatile bool s_pending_inverted_val = false;
 static volatile bool s_pending_error = false;
 static char s_pending_error_msg[96];
+
+// M2.3 — pending channel-state update (bit0=crank,1=cam1,2=cam2 for both
+// `channels` (which channels the active pattern uses) and `inverts`
+// (per-channel XOR mask). Applied on the LVGL thread.
+static volatile bool    s_pending_channels = false;
+static volatile uint8_t s_pending_channel_mask = 0x01;
+static volatile uint8_t s_pending_invert_mask  = 0x00;
 
 static bool s_suppress_rpm_cb = false;
 static bool s_suppress_pattern_cb = false;
@@ -124,6 +208,31 @@ static void on_spin_inc(lv_event_t* e);
 static void on_spin_dec(lv_event_t* e);
 static void on_custom_apply(lv_event_t* e);
 static void on_custom_cancel(lv_event_t* e);
+
+// M3.4 / M4.5 / M5.7 / M7 forward decls.
+static void rebuild_pattern_dropdown_options(const char* filter);
+static void on_pattern_filter_changed(lv_event_t* e);
+static const char* category_for_pattern(const PatternRef* p);
+
+static void open_sweep_panel(lv_event_t* e);
+static void close_sweep_panel(lv_event_t* e);
+static void on_sweep_apply(lv_event_t* e);
+static void on_sweep_live_tick(lv_timer_t* t);
+
+static void open_comp_panel(lv_event_t* e);
+static void close_comp_panel(lv_event_t* e);
+static void on_comp_apply(lv_event_t* e);
+
+static void open_dsl_panel(lv_event_t* e);
+static void close_dsl_panel(lv_event_t* e);
+static void on_dsl_compile(lv_event_t* e);
+static void on_dsl_saveas(lv_event_t* e);
+static void on_dsl_load(lv_event_t* e);
+static void on_dsl_err_tick(lv_timer_t* t);
+
+static void open_wave_panel(lv_event_t* e);
+static void close_wave_panel(lv_event_t* e);
+static void on_wave_tick(lv_timer_t* t);
 
 
 // ---- LVGL callbacks ----
@@ -517,17 +626,31 @@ static void create_main_screen() {
   lv_label_set_text(lbl_pattern, "PATTERN");
 
   dd_patterns = lv_dropdown_create(screen_main);
-  lv_dropdown_set_options(dd_patterns, "60-2\n36-1\n36-2\n36-1-1\n12-1\nCUSTOM");
-  lv_obj_set_width(dd_patterns, 160);
+  // Build the 64-pattern options string with categorical headers. The
+  // headers are non-selectable in the sense that selecting one re-routes
+  // to the first real entry below it (handled in on_pattern_changed).
+  rebuild_pattern_dropdown_options(nullptr);
+  lv_obj_set_width(dd_patterns, 200);
   lv_obj_add_style(dd_patterns, &style_dropdown, LV_PART_MAIN);
   lv_obj_t* list = lv_dropdown_get_list(dd_patterns);
   if (list) {
     lv_obj_add_style(list, &style_dropdown, LV_PART_MAIN);
+    lv_obj_set_height(list, 200);  // scrollable
   }
   lv_obj_align(dd_patterns, LV_ALIGN_TOP_RIGHT, -20, 24);
   lv_obj_align_to(lbl_pattern, dd_patterns, LV_ALIGN_OUT_TOP_MID, 0, -6);
   lv_obj_add_event_cb(dd_patterns, on_pattern_changed, LV_EVENT_VALUE_CHANGED, NULL);
   lv_obj_add_event_cb(dd_patterns, on_pattern_open, LV_EVENT_CLICKED, NULL);
+
+  // M3.4: filter textarea below the dropdown.
+  ta_pattern_filter = lv_textarea_create(screen_main);
+  lv_textarea_set_one_line(ta_pattern_filter, true);
+  lv_textarea_set_placeholder_text(ta_pattern_filter, "filter...");
+  lv_obj_set_width(ta_pattern_filter, 200);
+  lv_obj_set_height(ta_pattern_filter, 28);
+  lv_obj_align_to(ta_pattern_filter, dd_patterns, LV_ALIGN_OUT_BOTTOM_MID, 0, 4);
+  lv_obj_add_event_cb(ta_pattern_filter, on_pattern_filter_changed,
+                      LV_EVENT_VALUE_CHANGED, NULL);
 
   btn_run = lv_btn_create(screen_main);
   lv_obj_set_size(btn_run, 160, 44);
@@ -553,6 +676,45 @@ static void create_main_screen() {
   lv_obj_align(lbl_error, LV_ALIGN_BOTTOM_LEFT, 12, -10);
   lv_obj_add_flag(lbl_error, LV_OBJ_FLAG_HIDDEN);
 
+  // M2.3: 3 channel-state LEDs along the top-left of the screen.
+  led_crank = lv_led_create(screen_main);
+  lv_obj_set_size(led_crank, 14, 14);
+  lv_obj_align(led_crank, LV_ALIGN_TOP_LEFT, 8, 8);
+  lv_led_set_color(led_crank, lv_color_hex(0x00E5FF));
+  lv_led_on(led_crank);
+
+  led_cam1 = lv_led_create(screen_main);
+  lv_obj_set_size(led_cam1, 14, 14);
+  lv_obj_align(led_cam1, LV_ALIGN_TOP_LEFT, 28, 8);
+  lv_led_set_color(led_cam1, lv_color_hex(0x37425A));
+  lv_led_set_brightness(led_cam1, 60);
+  lv_led_on(led_cam1);
+
+  led_cam2 = lv_led_create(screen_main);
+  lv_obj_set_size(led_cam2, 14, 14);
+  lv_obj_align(led_cam2, LV_ALIGN_TOP_LEFT, 48, 8);
+  lv_led_set_color(led_cam2, lv_color_hex(0x37425A));
+  lv_led_set_brightness(led_cam2, 60);
+  lv_led_on(led_cam2);
+
+  // Small action-button column: Sweep, Comp, DSL, Wave.
+  struct BtnSpec { const char* text; int y; lv_event_cb_t cb; };
+  const BtnSpec specs[] = {
+    {"SWEEP", 110, open_sweep_panel},
+    {"COMP",  142, open_comp_panel},
+    {"DSL",   174, open_dsl_panel},
+    {"WAVE",  206, open_wave_panel},
+  };
+  for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); ++i) {
+    lv_obj_t* b = lv_btn_create(screen_main);
+    lv_obj_set_size(b, 72, 28);
+    lv_obj_align(b, LV_ALIGN_TOP_RIGHT, -10, specs[i].y);
+    lv_obj_add_event_cb(b, specs[i].cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl = lv_label_create(b);
+    lv_label_set_text(lbl, specs[i].text);
+    lv_obj_center(lbl);
+  }
+
   update_rpm_label(lv_arc_get_value(arc_rpm));
 }
 
@@ -575,17 +737,26 @@ static void on_pattern_changed(lv_event_t* e) {
   uint16_t sel = lv_dropdown_get_selected(dd);
 
   if (s_suppress_pattern_cb) return;
+  if (sel >= s_pattern_dd_entry_count) return;
 
-  if (sel == 5) {
-    open_custom_panel();
-    s_suppress_pattern_cb = true;
-    lv_dropdown_set_selected(dd, s_last_preset_pattern);
-    s_suppress_pattern_cb = false;
-    return;
+  // Resolve through the dd->builtin mapping. Category headers map to -1
+  // and the next real entry is auto-selected.
+  int16_t builtin_idx = s_pattern_dd_to_builtin[sel];
+  if (builtin_idx < 0) {
+    // Header row — advance to next valid entry.
+    for (uint8_t i = sel + 1; i < s_pattern_dd_entry_count; ++i) {
+      if (s_pattern_dd_to_builtin[i] >= 0) {
+        s_suppress_pattern_cb = true;
+        lv_dropdown_set_selected(dd, i);
+        s_suppress_pattern_cb = false;
+        builtin_idx = s_pattern_dd_to_builtin[i];
+        break;
+      }
+    }
+    if (builtin_idx < 0) return;
   }
-
-  s_last_preset_pattern = (uint8_t)sel;
-  if (s_on_pattern) s_on_pattern((uint8_t)sel);
+  s_last_preset_pattern = (uint8_t)builtin_idx;
+  if (s_on_pattern) s_on_pattern((uint8_t)builtin_idx);
 }
 
 
@@ -737,6 +908,41 @@ void ui_show_error(const char* msg) {
   portEXIT_CRITICAL(&s_ui_mux);
 }
 
+void ui_update_channels(uint8_t channel_mask, uint8_t invert_mask) {
+  portENTER_CRITICAL(&s_ui_mux);
+  s_pending_channel_mask = channel_mask;
+  s_pending_invert_mask  = invert_mask;
+  s_pending_channels = true;
+  portEXIT_CRITICAL(&s_ui_mux);
+}
+
+// LED apply — runs on LVGL thread (called from apply_pending_updates).
+static void apply_channel_leds(uint8_t channel_mask, uint8_t invert_mask) {
+  struct LedRow { lv_obj_t* led; uint8_t bit; };
+  LedRow rows[3] = {
+    { led_crank, 0x01 },
+    { led_cam1,  0x02 },
+    { led_cam2,  0x04 },
+  };
+  for (int i = 0; i < 3; ++i) {
+    if (!rows[i].led) continue;
+    const bool active   = (channel_mask & rows[i].bit) != 0;
+    const bool inverted = (invert_mask  & rows[i].bit) != 0;
+    if (!active) {
+      // Greyed-out — channel unused by current pattern.
+      lv_led_set_color(rows[i].led, lv_color_hex(0x37425A));
+      lv_led_set_brightness(rows[i].led, 60);
+    } else {
+      lv_led_set_color(rows[i].led,
+                       inverted ? lv_color_hex(0xFFB020)
+                                : lv_color_hex(0x00E5FF));
+      lv_led_set_brightness(rows[i].led, 220);
+    }
+  }
+  s_visible_channel_mask = channel_mask;
+  s_visible_invert_mask  = invert_mask;
+}
+
 static void apply_pending_updates() {
   bool hasRpm = false;
   uint32_t rpm = 0;
@@ -749,6 +955,10 @@ static void apply_pending_updates() {
   bool hasError = false;
   char errorMsg[sizeof(s_pending_error_msg)];
 
+  bool hasChannels = false;
+  uint8_t chan_mask = 0x01;
+  uint8_t inv_mask  = 0x00;
+
   portENTER_CRITICAL(&s_ui_mux);
   if (s_pending_rpm) { hasRpm = true; rpm = s_pending_rpm_val; s_pending_rpm = false; }
   if (s_pending_pattern) { hasPattern = true; pattern = s_pending_pattern_val; s_pending_pattern = false; }
@@ -760,7 +970,15 @@ static void apply_pending_updates() {
     errorMsg[sizeof(errorMsg) - 1] = '\0';
     s_pending_error = false;
   }
+  if (s_pending_channels) {
+    hasChannels = true;
+    chan_mask = s_pending_channel_mask;
+    inv_mask  = s_pending_invert_mask;
+    s_pending_channels = false;
+  }
   portEXIT_CRITICAL(&s_ui_mux);
+
+  if (hasChannels) apply_channel_leds(chan_mask, inv_mask);
 
   if (hasRpm && arc_rpm) {
     s_suppress_rpm_cb = true;
@@ -775,10 +993,15 @@ static void apply_pending_updates() {
   }
 
   if (hasPattern && dd_patterns) {
-    if (pattern < 5) {
+    // M3.4: reverse-map builtin index -> dd row.
+    int row = -1;
+    for (uint8_t i = 0; i < s_pattern_dd_entry_count; ++i) {
+      if (s_pattern_dd_to_builtin[i] == (int16_t)pattern) { row = i; break; }
+    }
+    if (row >= 0) {
       s_last_preset_pattern = pattern;
       s_suppress_pattern_cb = true;
-      lv_dropdown_set_selected(dd_patterns, pattern);
+      lv_dropdown_set_selected(dd_patterns, (uint16_t)row);
       s_suppress_pattern_cb = false;
     }
   }
@@ -795,6 +1018,9 @@ static void apply_pending_updates() {
     s_inverted = inverted;
     refresh_invert_label();
     s_suppress_invert_cb = false;
+    // Mirror crank-channel invert state into the LED row.
+    uint8_t new_inv = (uint8_t)((s_visible_invert_mask & 0xFEu) | (inverted ? 0x01u : 0x00u));
+    apply_channel_leds(s_visible_channel_mask, new_inv);
   }
 
   if (hasError && lbl_error) {
@@ -817,3 +1043,615 @@ void ui_task_handler() {
   lv_timer_handler();
   apply_pending_updates();
 }
+
+// =====================================================
+// M3.4 — 64-pattern dropdown with category headers + search
+// =====================================================
+
+static const char* category_for_pattern(const PatternRef* p) {
+  if (!p || !p->name_key) return "Other";
+  if (strncmp(p->name_key, "dizzy_", 6) == 0) return "Distributor";
+  if (p->channel_mask & 0x06) return "Crank+Cam";
+  if (p->channel_mask == 0x01) {
+    // Heuristic: missing-tooth wheels have name keys containing "_minus_"
+    // (e.g. sixty_minus_two, thirty_six_minus_one) or numeric "X_minus_Y".
+    if (strstr(p->name_key, "_minus_") != nullptr) return "Missing-tooth";
+    return "Angular OEM";
+  }
+  return "Angular OEM";
+}
+
+static bool name_matches_filter(const char* friendly, const char* key,
+                                 const char* filter) {
+  if (!filter || !*filter) return true;
+  // Case-insensitive substring match against friendly name OR key.
+  const char* fn = friendly ? friendly : key;
+  if (!fn) return false;
+  const size_t flen = strlen(filter);
+  for (const char* p = fn; *p; ++p) {
+    size_t i = 0;
+    for (; i < flen; ++i) {
+      char a = (char)tolower((unsigned char)p[i]);
+      char b = (char)tolower((unsigned char)filter[i]);
+      if (!a || a != b) break;
+    }
+    if (i == flen) return true;
+  }
+  return false;
+}
+
+static void rebuild_pattern_dropdown_options(const char* filter) {
+  if (!dd_patterns) return;
+  // Build options string in 4 category-ordered passes.
+  static char opts[4096];
+  size_t off = 0;
+  s_pattern_dd_entry_count = 0;
+
+  const char* cats[] = { "Distributor", "Missing-tooth", "Crank+Cam", "Angular OEM" };
+  const size_t n = PatternLibrary::builtinCount();
+
+  for (int ci = 0; ci < 4; ++ci) {
+    // Header.
+    bool category_has_entries = false;
+    // Quick first pass to see if anything matches.
+    for (size_t i = 0; i < n; ++i) {
+      const PatternRef* p = PatternLibrary::builtinByIndex(i);
+      if (!p) continue;
+      if (strcmp(category_for_pattern(p), cats[ci]) != 0) continue;
+      const char* friendly = PatternLibrary::friendlyName(p->name_key);
+      if (!name_matches_filter(friendly, p->name_key, filter)) continue;
+      category_has_entries = true;
+      break;
+    }
+    if (!category_has_entries) continue;
+
+    // Header row.
+    if (s_pattern_dd_entry_count >= UI_PATTERN_DD_CAP) break;
+    if (off > 0 && off + 1 < sizeof(opts)) opts[off++] = '\n';
+    {
+      const char* hdr_prefix = "-- ";
+      const char* hdr_suffix = " --";
+      const size_t need = strlen(hdr_prefix) + strlen(cats[ci]) + strlen(hdr_suffix);
+      if (off + need + 1 >= sizeof(opts)) break;
+      memcpy(opts + off, hdr_prefix, strlen(hdr_prefix)); off += strlen(hdr_prefix);
+      memcpy(opts + off, cats[ci], strlen(cats[ci]));    off += strlen(cats[ci]);
+      memcpy(opts + off, hdr_suffix, strlen(hdr_suffix)); off += strlen(hdr_suffix);
+    }
+    s_pattern_dd_to_builtin[s_pattern_dd_entry_count++] = -1;
+
+    for (size_t i = 0; i < n; ++i) {
+      if (s_pattern_dd_entry_count >= UI_PATTERN_DD_CAP) break;
+      const PatternRef* p = PatternLibrary::builtinByIndex(i);
+      if (!p) continue;
+      if (strcmp(category_for_pattern(p), cats[ci]) != 0) continue;
+      const char* friendly = PatternLibrary::friendlyName(p->name_key);
+      const char* label = friendly ? friendly : p->name_key;
+      if (!label) continue;
+      if (!name_matches_filter(friendly, p->name_key, filter)) continue;
+      const size_t lab_len = strlen(label);
+      if (off + 1 + lab_len + 1 >= sizeof(opts)) break;
+      opts[off++] = '\n';
+      memcpy(opts + off, label, lab_len);
+      off += lab_len;
+      s_pattern_dd_to_builtin[s_pattern_dd_entry_count++] = (int16_t)i;
+    }
+  }
+  if (off < sizeof(opts)) opts[off] = '\0';
+  else opts[sizeof(opts) - 1] = '\0';
+
+  lv_dropdown_set_options(dd_patterns, opts);
+}
+
+static void on_pattern_filter_changed(lv_event_t* e) {
+  lv_obj_t* ta = lv_event_get_target_obj(e);
+  const char* txt = lv_textarea_get_text(ta);
+  strncpy(s_pattern_filter, txt ? txt : "", sizeof(s_pattern_filter) - 1);
+  s_pattern_filter[sizeof(s_pattern_filter) - 1] = '\0';
+  rebuild_pattern_dropdown_options(s_pattern_filter);
+}
+
+// =====================================================
+// M4.5 — Sweep + Compression modals
+// =====================================================
+
+static void close_sweep_panel(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (tmr_sweep_live) { lv_timer_del(tmr_sweep_live); tmr_sweep_live = nullptr; }
+  if (overlay_sweep) { lv_obj_del(overlay_sweep); overlay_sweep = nullptr; }
+  spin_sweep_low = spin_sweep_high = spin_sweep_iv = nullptr;
+  dd_sweep_mode = lbl_sweep_live = nullptr;
+}
+
+static void on_sweep_live_tick(lv_timer_t* t) {
+  LV_UNUSED(t);
+  if (!lbl_sweep_live) return;
+  lv_label_set_text_fmt(lbl_sweep_live, "Live: %u RPM", (unsigned)sweepCurrentRpm());
+}
+
+static void on_sweep_apply(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (!spin_sweep_low || !spin_sweep_high || !dd_sweep_mode || !spin_sweep_iv) return;
+  CtrlMsg m{};
+  m.type = MSG_SET_SWEEP;
+  m.payload.sweep.low_rpm     = (uint16_t)lv_spinbox_get_value(spin_sweep_low);
+  m.payload.sweep.high_rpm    = (uint16_t)lv_spinbox_get_value(spin_sweep_high);
+  m.payload.sweep.mode        = (uint8_t)lv_dropdown_get_selected(dd_sweep_mode);
+  m.payload.sweep.interval_us = (uint32_t)lv_spinbox_get_value(spin_sweep_iv);
+  if (gCtrlQ) (void)xQueueSend(gCtrlQ, &m, 0);
+  close_sweep_panel(nullptr);
+}
+
+static void open_sweep_panel(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (!screen_main || overlay_sweep) return;
+  overlay_sweep = lv_obj_create(screen_main);
+  lv_obj_set_size(overlay_sweep, lv_pct(100), lv_pct(100));
+  lv_obj_set_style_bg_color(overlay_sweep, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(overlay_sweep, LV_OPA_70, 0);
+  lv_obj_set_style_border_width(overlay_sweep, 0, 0);
+  lv_obj_clear_flag(overlay_sweep, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* panel = lv_obj_create(overlay_sweep);
+  lv_obj_set_size(panel, 380, 240);
+  lv_obj_center(panel);
+  lv_obj_add_style(panel, &style_dropdown, 0);
+  lv_obj_set_style_pad_all(panel, 10, 0);
+
+  lv_obj_t* title = lv_label_create(panel);
+  lv_label_set_text(title, "SWEEP");
+  lv_obj_add_style(title, &style_title, 0);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+
+  lv_obj_t* rows = lv_obj_create(panel);
+  lv_obj_set_size(rows, lv_pct(100), 140);
+  lv_obj_align(rows, LV_ALIGN_TOP_MID, 0, 26);
+  lv_obj_set_style_bg_opa(rows, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(rows, 0, 0);
+  lv_obj_set_style_pad_all(rows, 0, 0);
+  lv_obj_set_style_pad_row(rows, 6, 0);
+  lv_obj_set_flex_flow(rows, LV_FLEX_FLOW_COLUMN);
+  lv_obj_clear_flag(rows, LV_OBJ_FLAG_SCROLLABLE);
+
+  make_spin_row(rows, "Low RPM", &spin_sweep_low, 100, 6000, g_sweep_low_rpm);
+  make_spin_row(rows, "High RPM", &spin_sweep_high, 100, 6000, g_sweep_high_rpm);
+  // Mode dropdown
+  lv_obj_t* rowMode = lv_obj_create(rows);
+  lv_obj_set_size(rowMode, lv_pct(100), 34);
+  lv_obj_set_style_bg_opa(rowMode, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(rowMode, 0, 0);
+  lv_obj_set_style_pad_all(rowMode, 0, 0);
+  lv_obj_t* lblMode = lv_label_create(rowMode);
+  lv_label_set_text(lblMode, "Mode");
+  lv_obj_add_style(lblMode, &style_caption, 0);
+  lv_obj_align(lblMode, LV_ALIGN_LEFT_MID, 0, 0);
+  dd_sweep_mode = lv_dropdown_create(rowMode);
+  lv_dropdown_set_options(dd_sweep_mode, "OFF\nLINEAR\nLOG\nWAYPOINT");
+  lv_dropdown_set_selected(dd_sweep_mode, g_sweep_mode);
+  lv_obj_set_width(dd_sweep_mode, 140);
+  lv_obj_align(dd_sweep_mode, LV_ALIGN_RIGHT_MID, 0, 0);
+
+  make_spin_row(rows, "Interval us", &spin_sweep_iv, 100, 100000, (int)g_sweep_interval_us);
+
+  lbl_sweep_live = lv_label_create(panel);
+  lv_obj_add_style(lbl_sweep_live, &style_caption, 0);
+  lv_label_set_text(lbl_sweep_live, "Live: ---");
+  lv_obj_align(lbl_sweep_live, LV_ALIGN_BOTTOM_LEFT, 0, -48);
+
+  lv_obj_t* btnCancel = lv_btn_create(panel);
+  lv_obj_set_size(btnCancel, 100, 36);
+  lv_obj_align(btnCancel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  lv_obj_add_event_cb(btnCancel, close_sweep_panel, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l1 = lv_label_create(btnCancel); lv_label_set_text(l1, "CANCEL"); lv_obj_center(l1);
+
+  lv_obj_t* btnApply = lv_btn_create(panel);
+  lv_obj_set_size(btnApply, 100, 36);
+  lv_obj_align(btnApply, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_add_event_cb(btnApply, on_sweep_apply, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l2 = lv_label_create(btnApply); lv_label_set_text(l2, "APPLY"); lv_obj_center(l2);
+
+  tmr_sweep_live = lv_timer_create(on_sweep_live_tick, 100, NULL);
+}
+
+static void close_comp_panel(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (overlay_comp) { lv_obj_del(overlay_comp); overlay_comp = nullptr; }
+  sw_comp_en = sw_comp_dyn = nullptr;
+  spin_comp_cyl = spin_comp_thr = spin_comp_peak = nullptr;
+}
+
+static void on_comp_apply(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (!sw_comp_en || !sw_comp_dyn || !spin_comp_cyl || !spin_comp_thr || !spin_comp_peak) return;
+  CtrlMsg m{};
+  m.type = MSG_SET_COMPRESSION;
+  m.payload.comp.enabled    = lv_obj_has_state(sw_comp_en, LV_STATE_CHECKED);
+  m.payload.comp.cyl        = (uint8_t)lv_spinbox_get_value(spin_comp_cyl);
+  m.payload.comp.rpm_thresh = (uint16_t)lv_spinbox_get_value(spin_comp_thr);
+  m.payload.comp.peak       = (uint8_t)lv_spinbox_get_value(spin_comp_peak);
+  m.payload.comp.dynamic    = lv_obj_has_state(sw_comp_dyn, LV_STATE_CHECKED);
+  if (gCtrlQ) (void)xQueueSend(gCtrlQ, &m, 0);
+  close_comp_panel(nullptr);
+}
+
+static void open_comp_panel(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (!screen_main || overlay_comp) return;
+  overlay_comp = lv_obj_create(screen_main);
+  lv_obj_set_size(overlay_comp, lv_pct(100), lv_pct(100));
+  lv_obj_set_style_bg_color(overlay_comp, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(overlay_comp, LV_OPA_70, 0);
+  lv_obj_set_style_border_width(overlay_comp, 0, 0);
+  lv_obj_clear_flag(overlay_comp, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* panel = lv_obj_create(overlay_comp);
+  lv_obj_set_size(panel, 380, 240);
+  lv_obj_center(panel);
+  lv_obj_add_style(panel, &style_dropdown, 0);
+  lv_obj_set_style_pad_all(panel, 10, 0);
+
+  lv_obj_t* title = lv_label_create(panel);
+  lv_label_set_text(title, "COMPRESSION");
+  lv_obj_add_style(title, &style_title, 0);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+
+  lv_obj_t* rows = lv_obj_create(panel);
+  lv_obj_set_size(rows, lv_pct(100), 150);
+  lv_obj_align(rows, LV_ALIGN_TOP_MID, 0, 26);
+  lv_obj_set_style_bg_opa(rows, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(rows, 0, 0);
+  lv_obj_set_style_pad_all(rows, 0, 0);
+  lv_obj_set_style_pad_row(rows, 4, 0);
+  lv_obj_set_flex_flow(rows, LV_FLEX_FLOW_COLUMN);
+  lv_obj_clear_flag(rows, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* rowEn = lv_obj_create(rows);
+  lv_obj_set_size(rowEn, lv_pct(100), 30);
+  lv_obj_set_style_bg_opa(rowEn, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(rowEn, 0, 0);
+  lv_obj_set_style_pad_all(rowEn, 0, 0);
+  lv_obj_t* lblEn = lv_label_create(rowEn);
+  lv_label_set_text(lblEn, "Enabled");
+  lv_obj_add_style(lblEn, &style_caption, 0);
+  lv_obj_align(lblEn, LV_ALIGN_LEFT_MID, 0, 0);
+  sw_comp_en = lv_switch_create(rowEn);
+  lv_obj_align(sw_comp_en, LV_ALIGN_RIGHT_MID, 0, 0);
+  if (g_comp_enabled) lv_obj_add_state(sw_comp_en, LV_STATE_CHECKED);
+
+  make_spin_row(rows, "Cylinders", &spin_comp_cyl, 1, 12, g_comp_cyl);
+  make_spin_row(rows, "RPM Thresh", &spin_comp_thr, 100, 6000, g_comp_rpm_thresh);
+  make_spin_row(rows, "Peak", &spin_comp_peak, 0, 255, g_comp_peak);
+
+  lv_obj_t* rowDyn = lv_obj_create(rows);
+  lv_obj_set_size(rowDyn, lv_pct(100), 30);
+  lv_obj_set_style_bg_opa(rowDyn, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(rowDyn, 0, 0);
+  lv_obj_set_style_pad_all(rowDyn, 0, 0);
+  lv_obj_t* lblDyn = lv_label_create(rowDyn);
+  lv_label_set_text(lblDyn, "Dynamic");
+  lv_obj_add_style(lblDyn, &style_caption, 0);
+  lv_obj_align(lblDyn, LV_ALIGN_LEFT_MID, 0, 0);
+  sw_comp_dyn = lv_switch_create(rowDyn);
+  lv_obj_align(sw_comp_dyn, LV_ALIGN_RIGHT_MID, 0, 0);
+  if (g_comp_dynamic) lv_obj_add_state(sw_comp_dyn, LV_STATE_CHECKED);
+
+  lv_obj_t* btnCancel = lv_btn_create(panel);
+  lv_obj_set_size(btnCancel, 100, 36);
+  lv_obj_align(btnCancel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  lv_obj_add_event_cb(btnCancel, close_comp_panel, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l1 = lv_label_create(btnCancel); lv_label_set_text(l1, "CANCEL"); lv_obj_center(l1);
+
+  lv_obj_t* btnApply = lv_btn_create(panel);
+  lv_obj_set_size(btnApply, 100, 36);
+  lv_obj_align(btnApply, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_add_event_cb(btnApply, on_comp_apply, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l2 = lv_label_create(btnApply); lv_label_set_text(l2, "APPLY"); lv_obj_center(l2);
+}
+
+// =====================================================
+// M5.7 — DSL editor modal
+// =====================================================
+
+static void on_dsl_err_tick(lv_timer_t* t) {
+  LV_UNUSED(t);
+  if (!lbl_dsl_err) return;
+  if (g_dsl_error[0]) {
+    lv_label_set_text(lbl_dsl_err, (const char*)g_dsl_error);
+  } else {
+    lv_label_set_text(lbl_dsl_err, "OK");
+  }
+}
+
+static void close_dsl_panel(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (tmr_dsl_err) { lv_timer_del(tmr_dsl_err); tmr_dsl_err = nullptr; }
+  if (overlay_dsl) { lv_obj_del(overlay_dsl); overlay_dsl = nullptr; }
+  ta_dsl_src = nullptr;
+  lbl_dsl_err = nullptr;
+}
+
+static void on_dsl_compile(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (!ta_dsl_src) return;
+  const char* src = lv_textarea_get_text(ta_dsl_src);
+  if (!src) return;
+  // Heap-copy the source; manager will free.
+  char* heap = (char*)malloc(strlen(src) + 1);
+  if (!heap) return;
+  strcpy(heap, src);
+  CtrlMsg m{};
+  m.type = MSG_LOAD_DSL;
+  m.payload.name = heap;
+  if (!gCtrlQ || xQueueSend(gCtrlQ, &m, 0) != pdTRUE) {
+    free(heap);
+  }
+}
+
+static void on_dsl_saveas(lv_event_t* e) {
+  LV_UNUSED(e);
+  // Route through MSG_SAVE_USER so the manager task owns persistence.
+  // We heap-allocate copies of BOTH the key and the DSL source; the
+  // manager free()'s them after PatternStorage::saveDsl().
+  if (!ta_dsl_src) return;
+  const char* src = lv_textarea_get_text(ta_dsl_src);
+  if (!src) return;
+
+  char key[32];
+  snprintf(key, sizeof(key), "scratch_%lu", (unsigned long)millis());
+
+  char* name_heap = (char*)malloc(strlen(key) + 1);
+  char* src_heap  = (char*)malloc(strlen(src) + 1);
+  if (!name_heap || !src_heap) {
+    free(name_heap);
+    free(src_heap);
+    if (lbl_dsl_err) lv_label_set_text(lbl_dsl_err, "save: oom");
+    return;
+  }
+  strcpy(name_heap, key);
+  strcpy(src_heap,  src);
+
+  CtrlMsg m{};
+  m.type = MSG_SAVE_USER;
+  m.payload.save.name       = name_heap;
+  m.payload.save.dsl_source = src_heap;
+  if (!sendCtrlMsg(m)) {
+    free(name_heap);
+    free(src_heap);
+    if (lbl_dsl_err) lv_label_set_text(lbl_dsl_err, "save: queue full");
+    return;
+  }
+  if (lbl_dsl_err) lv_label_set_text_fmt(lbl_dsl_err, "saving %s", key);
+}
+
+static void on_dsl_load(lv_event_t* e) {
+  LV_UNUSED(e);
+  // List patterns; pick the first one (stub for full file-picker).
+  char keys[8][PatternStorage::KEY_BUFLEN];
+  size_t n = PatternStorage::listPatterns(keys, 8);
+  if (n == 0) {
+    if (lbl_dsl_err) lv_label_set_text(lbl_dsl_err, "no saved patterns");
+    return;
+  }
+  char buf[2048];
+  if (!PatternStorage::loadDsl(keys[0], buf, sizeof(buf))) {
+    if (lbl_dsl_err) lv_label_set_text(lbl_dsl_err, "load failed");
+    return;
+  }
+  if (ta_dsl_src) lv_textarea_set_text(ta_dsl_src, buf);
+  if (lbl_dsl_err) lv_label_set_text_fmt(lbl_dsl_err, "loaded %s", keys[0]);
+}
+
+static void open_dsl_panel(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (!screen_main || overlay_dsl) return;
+  overlay_dsl = lv_obj_create(screen_main);
+  lv_obj_set_size(overlay_dsl, lv_pct(100), lv_pct(100));
+  lv_obj_set_style_bg_color(overlay_dsl, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(overlay_dsl, LV_OPA_80, 0);
+  lv_obj_set_style_border_width(overlay_dsl, 0, 0);
+  lv_obj_clear_flag(overlay_dsl, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* panel = lv_obj_create(overlay_dsl);
+  lv_obj_set_size(panel, 460, 250);
+  lv_obj_center(panel);
+  lv_obj_add_style(panel, &style_dropdown, 0);
+  lv_obj_set_style_pad_all(panel, 8, 0);
+
+  lv_obj_t* title = lv_label_create(panel);
+  lv_label_set_text(title, "DSL");
+  lv_obj_add_style(title, &style_title, 0);
+  lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+  ta_dsl_src = lv_textarea_create(panel);
+  lv_obj_set_size(ta_dsl_src, 440, 140);
+  lv_obj_align(ta_dsl_src, LV_ALIGN_TOP_LEFT, 0, 20);
+  lv_textarea_set_placeholder_text(ta_dsl_src, "wheel DSL source...");
+
+  lbl_dsl_err = lv_label_create(panel);
+  lv_obj_add_style(lbl_dsl_err, &style_caption, 0);
+  lv_label_set_text(lbl_dsl_err, "");
+  lv_obj_align(lbl_dsl_err, LV_ALIGN_BOTTOM_LEFT, 0, -42);
+
+  // Buttons row
+  lv_obj_t* btnCompile = lv_btn_create(panel);
+  lv_obj_set_size(btnCompile, 90, 32);
+  lv_obj_align(btnCompile, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  lv_obj_add_event_cb(btnCompile, on_dsl_compile, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l1 = lv_label_create(btnCompile); lv_label_set_text(l1, "COMPILE"); lv_obj_center(l1);
+
+  lv_obj_t* btnSave = lv_btn_create(panel);
+  lv_obj_set_size(btnSave, 90, 32);
+  lv_obj_align(btnSave, LV_ALIGN_BOTTOM_LEFT, 95, 0);
+  lv_obj_add_event_cb(btnSave, on_dsl_saveas, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l2 = lv_label_create(btnSave); lv_label_set_text(l2, "SAVE"); lv_obj_center(l2);
+
+  lv_obj_t* btnLoad = lv_btn_create(panel);
+  lv_obj_set_size(btnLoad, 90, 32);
+  lv_obj_align(btnLoad, LV_ALIGN_BOTTOM_LEFT, 190, 0);
+  lv_obj_add_event_cb(btnLoad, on_dsl_load, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l3 = lv_label_create(btnLoad); lv_label_set_text(l3, "LOAD"); lv_obj_center(l3);
+
+  lv_obj_t* btnClose = lv_btn_create(panel);
+  lv_obj_set_size(btnClose, 90, 32);
+  lv_obj_align(btnClose, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_add_event_cb(btnClose, close_dsl_panel, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l4 = lv_label_create(btnClose); lv_label_set_text(l4, "CLOSE"); lv_obj_center(l4);
+
+  tmr_dsl_err = lv_timer_create(on_dsl_err_tick, 250, NULL);
+}
+
+// =====================================================
+// M7 — Waveform canvas
+// =====================================================
+
+// Active pattern access — main.cpp maintains gActivePattern; we hook
+// a getter via an extern. For independence, fall back to the first
+// builtin if unset.
+extern "C" const PatternRef* ui_get_active_pattern_for_wave();
+
+// Default hook returns first builtin if main.cpp's symbol isn't linked
+// (e.g. unit-test stub).
+__attribute__((weak)) const PatternRef* ui_get_active_pattern_for_wave() {
+  return PatternLibrary::builtinByIndex(0);
+}
+
+// At 1000 RPM the cursor must traverse pattern in
+//    60 ms (360 deg)  or 120 ms (720 deg).
+// Math: rev_us = 60 / RPM seconds = 60_000_000/RPM us. For RPM=1000 →
+// 60_000 us = 60 ms. A 720-degree pattern covers 2 revs → 120 ms.
+// Cursor index = (now_us - cycle_start_us) / period_us; period_us =
+// rev_us / slot_count. We compute it from PatternRef + IGenerator state
+// (gGen.getEdgeCounter() gives exact slot — preferred).
+extern "C" uint16_t ui_get_edge_counter();
+__attribute__((weak)) uint16_t ui_get_edge_counter() { return 0; }
+
+static void on_wave_tick(lv_timer_t* t) {
+  LV_UNUSED(t);
+  if (!canvas_wave) return;
+  const PatternRef* p = ui_get_active_pattern_for_wave();
+  if (!p || !p->table || p->slot_count == 0) return;
+
+  const lv_coord_t w = lv_obj_get_width(canvas_wave);
+  const lv_coord_t h = lv_obj_get_height(canvas_wave);
+  if (w <= 0 || h <= 0) return;
+
+  // Clear background.
+  lv_draw_rect_dsc_t bg;
+  lv_draw_rect_dsc_init(&bg);
+  bg.bg_color = lv_color_hex(0x0B1020);
+  bg.bg_opa = LV_OPA_COVER;
+  lv_layer_t layer;
+  lv_canvas_init_layer(canvas_wave, &layer);
+  lv_area_t full = { 0, 0, (lv_coord_t)(w - 1), (lv_coord_t)(h - 1) };
+  lv_draw_rect(&layer, &bg, &full);
+
+  // 3 lanes; lane height = h/3.
+  const int lane_h = h / 3;
+  const lv_color_t lane_colors[3] = {
+    lv_color_hex(0x00E5FF),
+    lv_color_hex(0xFFB020),
+    lv_color_hex(0x7CFFB0),
+  };
+  const uint8_t lane_bits[3] = { 0x01, 0x02, 0x04 };
+
+  const int slot_count = p->slot_count;
+  const int pixels_per_slot = (s_wave_zoom > 0 ? s_wave_zoom : 1);
+  const int total_w = slot_count * pixels_per_slot;
+  const int scroll_x = 0;
+  (void)scroll_x; (void)total_w;
+
+  for (int lane = 0; lane < 3; ++lane) {
+    if (!(s_wave_lane_mask & lane_bits[lane])) continue;
+    const int y_base = lane * lane_h + lane_h - 4;
+    const int y_high = lane * lane_h + 4;
+    lv_draw_line_dsc_t ld;
+    lv_draw_line_dsc_init(&ld);
+    ld.color = lane_colors[lane];
+    ld.width = 2;
+    int prev_y = y_base;
+    for (int s = 0; s < slot_count && s * pixels_per_slot < w; ++s) {
+      const bool bit = (p->table[s] & lane_bits[lane]) != 0;
+      const int y = bit ? y_high : y_base;
+      const int x = s * pixels_per_slot;
+      // Vertical edge.
+      if (y != prev_y && s > 0) {
+        ld.p1.x = x; ld.p1.y = prev_y; ld.p2.x = x; ld.p2.y = y;
+        lv_draw_line(&layer, &ld);
+      }
+      // Horizontal level.
+      ld.p1.x = x; ld.p1.y = y; ld.p2.x = x + pixels_per_slot; ld.p2.y = y;
+      lv_draw_line(&layer, &ld);
+      prev_y = y;
+    }
+  }
+
+  // Cursor — follows getEdgeCounter (M7.1).
+  const uint16_t cur = ui_get_edge_counter();
+  if (cur < slot_count) {
+    lv_draw_line_dsc_t cd;
+    lv_draw_line_dsc_init(&cd);
+    cd.color = lv_color_hex(0xFF4060);
+    cd.width = 1;
+    const int cx = cur * pixels_per_slot;
+    cd.p1.x = cx; cd.p1.y = 0; cd.p2.x = cx; cd.p2.y = h - 1;
+    lv_draw_line(&layer, &cd);
+  }
+  lv_canvas_finish_layer(canvas_wave, &layer);
+}
+
+static void close_wave_panel(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (tmr_wave) { lv_timer_del(tmr_wave); tmr_wave = nullptr; }
+  if (canvas_wave_buf) { heap_caps_free(canvas_wave_buf); canvas_wave_buf = nullptr; }
+  if (overlay_wave) { lv_obj_del(overlay_wave); overlay_wave = nullptr; }
+  canvas_wave = nullptr;
+}
+
+static void open_wave_panel(lv_event_t* e) {
+  LV_UNUSED(e);
+  if (!screen_main || overlay_wave) return;
+  overlay_wave = lv_obj_create(screen_main);
+  lv_obj_set_size(overlay_wave, lv_pct(100), lv_pct(100));
+  lv_obj_set_style_bg_color(overlay_wave, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(overlay_wave, LV_OPA_90, 0);
+  lv_obj_clear_flag(overlay_wave, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* panel = lv_obj_create(overlay_wave);
+  lv_obj_set_size(panel, 460, 240);
+  lv_obj_center(panel);
+  lv_obj_add_style(panel, &style_dropdown, 0);
+  lv_obj_set_style_pad_all(panel, 6, 0);
+
+  lv_obj_t* title = lv_label_create(panel);
+  lv_label_set_text(title, "WAVEFORM");
+  lv_obj_add_style(title, &style_title, 0);
+  lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+  const int cw = 440;
+  const int ch = 160;
+  const size_t buf_bytes = LV_CANVAS_BUF_SIZE(cw, ch, LV_COLOR_DEPTH, LV_DRAW_BUF_STRIDE_ALIGN);
+  canvas_wave_buf = (lv_color_t*)heap_caps_malloc(buf_bytes,
+                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!canvas_wave_buf) {
+    canvas_wave_buf = (lv_color_t*)heap_caps_malloc(buf_bytes, MALLOC_CAP_8BIT);
+  }
+  if (canvas_wave_buf) {
+    canvas_wave = lv_canvas_create(panel);
+    lv_canvas_set_buffer(canvas_wave, canvas_wave_buf, cw, ch, LV_COLOR_FORMAT_NATIVE);
+    lv_obj_set_size(canvas_wave, cw, ch);
+    lv_obj_align(canvas_wave, LV_ALIGN_TOP_LEFT, 0, 22);
+  }
+
+  lv_obj_t* btnClose = lv_btn_create(panel);
+  lv_obj_set_size(btnClose, 90, 30);
+  lv_obj_align(btnClose, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_add_event_cb(btnClose, close_wave_panel, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l1 = lv_label_create(btnClose); lv_label_set_text(l1, "CLOSE"); lv_obj_center(l1);
+
+  // 50 ms (20 Hz) — at 1000 RPM the 60-2 cursor (120 slots, 500 us/slot)
+  // hops ~100 slots between frames; entire pattern visibly traverses
+  // in 60 ms for a 360-degree wheel, 120 ms for a 720-degree wheel.
+  tmr_wave = lv_timer_create(on_wave_tick, 50, NULL);
+}
+
+#endif  // SIGGEN_HAS_DISPLAY
+

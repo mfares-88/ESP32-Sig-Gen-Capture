@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls *)",
+      "Read(//wsl.localhost/Ubuntu/home/mfares/0.Projects/**)",
+      "Read(//wsl.localhost/Ubuntu/home/mfares/0.Projects/Ardu-Stim-master/**)",
+      "Bash(wc *)",
+      "Bash(pio --version)",
+      "Bash(findstr /i \"integration\")",
+      "Bash(cd \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\mfares\\\\0.Projects\\\\0.Signal_Generator\")",
+      "Bash(/c/Python313/python *)",
+      "Bash(g++ -std=c++17 -Wall -Wextra -DDSL_LEXER_TEST_HOST -Ilib/dsl -o /tmp/dsl_lex_test test/test_dsl_lexer.cpp lib/dsl/Lexer.cpp)",
+      "Bash(wsl *)",
+      "Read(///wsl.localhost/Ubuntu/home/mfares/0.Projects/0.Signal_Generator/**)",
+      "Read(///wsl.localhost/Ubuntu/home/mfares/0.Projects/0.Signal_Generator/lib/**)",
+      "Bash(grep -E '^[[:space:]]*[0-9]+[[:space:]]*$')",
+      "Read(///wsl.localhost/Ubuntu/home/mfares/0.Projects/**)",
+      "Bash(python tools/convert_ardustim_wheels.py)",
+      "PowerShell(Test-Path *)",
+      "Bash(g++ -std=c++17 -DPATTERN_MIGRATION_TEST_HOST -Ilib/ckp_gen -Ilib/patterns test/test_pattern_migration.cpp lib/patterns/PatternLibrary.cpp -o /tmp/test_pattern_migration)",
+      "Bash(g++ --version)",
+      "Bash(/c/Users/mahmo/.platformio/penv/Scripts/platformio.exe *)",
+      "PowerShell(wsl which g++; wsl g++ --version)",
+      "PowerShell(wsl bash -c \"cd /home/mfares/0.Projects/0.Signal_Generator && g++ -std=c++17 -DDSL_LEXER_TEST_HOST -I lib/dsl -I lib/ckp_gen lib/dsl/Lexer.cpp lib/dsl/Parser.cpp lib/dsl/Validator.cpp lib/dsl/Compiler.cpp test/test_dsl_compiler.cpp -o /tmp/test_compiler 2>&1 | head -80\")",
+      "Bash(python)",
+      "PowerShell(wsl bash -c \"cd /home/mfares/0.Projects/0.Signal_Generator && g++ -std=c++17 -DDSL_LEXER_TEST_HOST -DDSL_HOST_TEST -I lib/dsl -I lib/ckp_gen lib/dsl/Lexer.cpp lib/dsl/Parser.cpp lib/dsl/Validator.cpp lib/dsl/Compiler.cpp test/test_dsl_compiler.cpp -o /tmp/test_compiler 2>&1 | head -60\")",
+      "Bash(python tools/_quick_brace_check.py)",
+      "PowerShell(wsl bash -c \"/tmp/test_compiler 2>&1\")",
+      "PowerShell(wsl bash -c \"cd /home/mfares/0.Projects/0.Signal_Generator && g++ -std=c++17 -DDSL_LEXER_TEST_HOST -DDSL_HOST_TEST -I lib/dsl -I lib/ckp_gen lib/dsl/Lexer.cpp lib/dsl/Parser.cpp lib/dsl/Validator.cpp lib/dsl/Compiler.cpp test/test_dsl_validator.cpp -o /tmp/test_validator 2>&1 | head -60 && /tmp/test_validator\")",
+      "PowerShell(wsl bash -c \"cd /home/mfares/0.Projects/0.Signal_Generator && g++ -std=c++17 -DDSL_LEXER_TEST_HOST -I lib/dsl lib/dsl/Lexer.cpp test/test_dsl_lexer.cpp -o /tmp/test_lexer 2>&1 && /tmp/test_lexer\")",
+      "PowerShell(wsl bash -c \"cd /home/mfares/0.Projects/0.Signal_Generator && g++ -std=c++17 -Wall -Wextra -DDSL_LEXER_TEST_HOST -DDSL_HOST_TEST -I lib/dsl -I lib/ckp_gen lib/dsl/Lexer.cpp lib/dsl/Parser.cpp lib/dsl/Validator.cpp lib/dsl/Compiler.cpp test/test_dsl_compiler.cpp -o /tmp/test_compiler 2>&1 | head -40 && /tmp/test_compiler && wsl bash -c 'cd /home/mfares/0.Projects/0.Signal_Generator && g++ -std=c++17 -DDSL_LEXER_TEST_HOST -DDSL_HOST_TEST -I lib/dsl -I lib/ckp_gen lib/dsl/Lexer.cpp lib/dsl/Parser.cpp lib/dsl/Validator.cpp lib/dsl/Compiler.cpp test/test_dsl_validator.cpp -o /tmp/test_validator && /tmp/test_validator'\")",
+      "PowerShell(wsl bash -c \"cd /home/mfares/0.Projects/0.Signal_Generator && g++ -std=c++17 -Wall -Wextra -DDSL_LEXER_TEST_HOST -DDSL_HOST_TEST -I lib/dsl -I lib/ckp_gen lib/dsl/Lexer.cpp lib/dsl/Parser.cpp lib/dsl/Validator.cpp lib/dsl/Compiler.cpp test/test_dsl_compiler.cpp -o /tmp/test_compiler 2>&1 | head -40\")",
+      "PowerShell(wsl bash -c \"/tmp/test_compiler\")",
+      "PowerShell(wsl bash -c \"cd /home/mfares/0.Projects/0.Signal_Generator && g++ -std=c++17 -DDSL_LEXER_TEST_HOST -DDSL_HOST_TEST -I lib/dsl -I lib/ckp_gen lib/dsl/Lexer.cpp lib/dsl/Parser.cpp lib/dsl/Validator.cpp lib/dsl/Compiler.cpp test/test_dsl_validator.cpp -o /tmp/test_validator 2>&1 | head -40 && /tmp/test_validator\")",
+      "Bash(tasklist.exe)",
+      "Bash([ ! -f \"$f\" ])",
+      "Read(//c/Users/mahmo/**)",
+      "Bash(powershell.exe -Command \"\\(Get-Content '\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu\\\\\\\\home\\\\\\\\mfares\\\\\\\\0.Projects\\\\\\\\0.Signal_Generator\\\\\\\\lib\\\\\\\\ui_lvgl\\\\\\\\ui_lvgl.cpp' | Measure-Object -Line\\).Lines\")"
+    ]
+  }
+}

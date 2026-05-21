@@ -1,0 +1,15 @@
+# ESP32 Signal Generator partition table (4 MiB flash, single-app, no OTA)
+# Layout chosen for §M0.3 of _Plans-and-Records/implementation_plan.md
+#
+#   nvs       24 KiB  config / pattern_key / sweep / comp           (versioned schema, M3.5)
+#   app0   ~2.94 MiB  factory firmware                              (lvgl + arduino-esp32 fits)
+#   littlefs   1 MiB  /patterns/<key>.dsl + /patterns/<key>.bin     (M5.6)
+#
+# Math: 0x9000 + 0x6000 + 0x2F0000 + 0x100000 = 0x400000 = 4 MiB exact.
+# No otadata partition: project is not OTA-capable; this also avoids the
+# 0xF000+0x2000 vs 0x10000 overlap in the naive "standard" layout.
+#
+# Name,     Type, SubType, Offset,    Size,       Flags
+nvs,        data, nvs,     0x9000,    0x6000,
+app0,       app,  factory, 0x10000,   0x2F0000,
+littlefs,   data, spiffs,  0x300000,  0x100000,

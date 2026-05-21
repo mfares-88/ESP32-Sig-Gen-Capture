@@ -617,6 +617,7 @@
  /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/freertos_stats.h \
  /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
+ lib/ckp_gen/PatternRef.h \
  /home/mfares/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src/Wire.h \
  /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal.h \
  /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-log.h \
@@ -782,4 +783,7 @@
  .pio/libdeps/esp32-s3-n4r8/GFX\ Library\ for\ Arduino/src/display/Arduino_WEA2012.h \
  .pio/libdeps/esp32-s3-n4r8/Dev\ Device\ Pins/src/PINS_JC4827W543.h \
  .pio/libdeps/esp32-s3-n4r8/TAMC_GT911/TAMC_GT911.h \
- /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h
+ /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h \
+ lib/patterns/PatternLibrary.h lib/sweep_compression/PatternStorage.h \
+ lib/sweep_compression/SweepCompression.h lib/ui_lvgl/ctrl_msg.h \
+ lib/sweep_compression/NvsStore.h

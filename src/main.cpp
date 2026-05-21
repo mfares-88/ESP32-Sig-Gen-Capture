@@ -1,9 +1,29 @@
-// ESP32 Crankshaft Signal Generator (UI-only control)
-// - LVGL UI drives RPM/pattern/start/stop
-// - FreeRTOS queue carries UI requests to the manager task
-// - Timer ISR in lib/ckp_gen generates the CKP waveform
+// ESP32 Crankshaft Signal Generator — Big Integration (M1.3 + M2.3 + M3.4 +
+// M4.5 + M5.7 + M6 + M7 + M9). See _Plans-and-Records/implementation_plan.md.
+//
+// Agent E (ui-io) custody. This TU wires together every other agent's
+// modules and is the single integration point for the manager task.
+//
+// Build flag contract:
+//   -DSIGGEN_BACKEND_TABLE=1  → TableCkpGenerator (M1.1 native byte-table
+//                               backend) drives the manager↔generator path.
+//                               MSG_SET_PATTERN routes legacy preset indices
+//                               through PatternLibrary::builtinByIndex().
+//                               This is the S3 production build.
+//   (unset)                   → TimerCkpGenerator legacy slot-machine fallback.
+//                               MSG_SET_PATTERN keeps the original
+//                               SignalConfig → applySignalConfig path so the
+//                               WROOM environment (no PSRAM / no LittleFS /
+//                               no UI) continues to ship.
+//
+// All UI inputs flow through gCtrlQ; UI callbacks never call the generator
+// directly (per §6 Agent E hard rules). The LVGL pending-flag pattern in
+// ui_lvgl.cpp is the only cross-core sync mechanism.
 
 #include <Arduino.h>
+#include <ctype.h>
+#include <string.h>
+#include <stdlib.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
@@ -11,10 +31,49 @@
 
 #include "CkpGenerator.h"
 #include "EdgePulseCapture.h"
-#include "ui_lvgl.h"
+#include "LittleFSInit.h"
+#include "PatternRef.h"
+#include "PatternLibrary.h"
+#include "NvsStore.h"
+#include "SweepCompression.h"
+#include "PatternStorage.h"
+#include "Dsl.h"
+#include "ctrl_msg.h"
+#include "serial_cli.h"
+#include "CaptureRecorder.h"
+
+#if defined(SIGGEN_HAS_DISPLAY)
+  // S3 build: LVGL is present, full UI surface is compiled in.
+  #include "ui_lvgl.h"
+#else
+  // WROOM (headless) build: provide no-op stubs so the manager task code
+  // stays readable. The control queue + ctrl_msg.h remain unguarded — they
+  // are protocol-level and shared with serial_cli.
+  typedef void (*ui_on_rpm_cb)(uint32_t rpm);
+  typedef void (*ui_on_pattern_cb)(uint8_t pattern_index);
+  typedef void (*ui_on_run_cb)(bool running);
+  typedef void (*ui_on_custom_cb)(const SignalConfig& cfg);
+  typedef void (*ui_on_invert_cb)(bool inverted);
+  static inline bool ui_init(ui_on_rpm_cb, ui_on_pattern_cb, ui_on_run_cb,
+                             ui_on_custom_cb, ui_on_invert_cb) { return true; }
+  static inline bool ui_is_ready() { return false; }
+  static inline void ui_update_rpm(uint32_t)               {}
+  static inline void ui_update_pattern(uint8_t)            {}
+  static inline void ui_update_running(bool)               {}
+  static inline void ui_update_inverted(bool)              {}
+  static inline void ui_show_error(const char*)            {}
+  static inline void ui_update_channels(uint8_t, uint8_t)  {}
+  static inline void ui_task_handler()                     {}
+#endif
+
+#if defined(SIGGEN_BACKEND_TABLE)
+  #include "TableCkpGenerator.h"
+#endif
 
 // -------------------- Pins --------------------
 #define PIN_CKP_OUT        17
+#define PIN_CAM1_OUT       21
+#define PIN_CAM2_OUT       22
 #define PIN_CAPTURE_IN     18
 
 // -------------------- Debug -------------------
@@ -33,19 +92,10 @@
 // Control / Manager (Core 1)
 // =====================================================
 
-enum MsgType : uint8_t { MSG_SET_RPM, MSG_SET_PATTERN, MSG_START, MSG_STOP, MSG_SET_CUSTOM, MSG_SET_INVERT };
+// CtrlMsg / MsgType / MsgPayload are declared in lib/ui_lvgl/ctrl_msg.h —
+// shared with serial_cli.cpp so the queue item-size matches across producers.
 
-union MsgPayload {
-  int32_t      val;
-  SignalConfig cfg;
-};
-
-struct CtrlMsg {
-  MsgType    type;
-  MsgPayload payload;
-};
-
-static QueueHandle_t gCtrlQ = nullptr;
+QueueHandle_t gCtrlQ = nullptr;
 
 static uint32_t gUiMsgDropCount = 0;
 static portMUX_TYPE gUiMsgDropMux = portMUX_INITIALIZER_UNLOCKED;
@@ -56,14 +106,82 @@ static inline void bumpUiMsgDropCount() {
   portEXIT_CRITICAL(&gUiMsgDropMux);
 }
 
-static TimerCkpGenerator genTX;
+// ---- Backend selection -------------------------------------------------
+//
+// M1.3 swap: prefer the native byte-table backend on S3; keep the legacy
+// slot machine on WROOM (no UI, no PSRAM — algorithmic ISR is sufficient).
+#if defined(SIGGEN_BACKEND_TABLE)
+  static TableCkpGenerator gGenInstance;
+#else
+  static TimerCkpGenerator gGenInstance;
+#endif
+static IGenerator& gGen = gGenInstance;
+// Alias for back-compat in any straggler references; not exposed publicly.
+#define genTX gGenInstance
+
 static EdgePulseCapture  capRX;
 
+// gCfg / gPatternIdx live on for the legacy SignalConfig pathway (MSG_SET_PATTERN,
+// MSG_SET_CUSTOM, MSG_SET_RPM). When SIGGEN_BACKEND_TABLE is on, gPatternIdx
+// shadows the active builtin index for UI sync purposes; gCfg.rpm still
+// represents the operator's "base RPM" target (sweep task rides on top).
 static SignalConfig gCfg{1000, 60, 1, 2, GAP_AT_END, false};
 static uint8_t gPatternIdx = 0;
 static volatile bool gRunning = true;
 static volatile bool gInverted = false;
+static const PatternRef* gActivePattern = nullptr;
 
+// DSL error pipe back to UI (cross-core, polled by LVGL timer per §6 Agent E).
+volatile char g_dsl_error[128] = {0};
+static portMUX_TYPE g_dsl_error_mux = portMUX_INITIALIZER_UNLOCKED;
+
+#if defined(SIGGEN_HAS_DISPLAY)
+// Waveform-canvas hooks (lib/ui_lvgl/ui_lvgl.cpp defines weak fallbacks).
+// WROOM build has no display → no need to expose these symbols.
+extern "C" const PatternRef* ui_get_active_pattern_for_wave() {
+  return gActivePattern ? gActivePattern : PatternLibrary::builtinByIndex(0);
+}
+extern "C" uint16_t ui_get_edge_counter() {
+  return gGen.getEdgeCounter();
+}
+#endif
+
+// ---- DSL scratch leak management (TODO 2) ------------------------------
+//
+// The manager owns the lifetime of the single "scratch_dsl" PSRAM table
+// produced by MSG_LOAD_DSL (and by the MSG_SET_CUSTOM compile path). On a
+// subsequent compile we must dslFree() the previous table before
+// publishing the new one. cleanupScratchDsl() is the single drain point
+// for any swap that may abandon the active DSL table.
+//
+// ESP32 doesn't truly "shutdown" — power loss is the practical exit — so
+// the manual call surface exists primarily for defensive correctness:
+// every code path that switches gActivePattern away from the DSL scratch
+// MUST invoke cleanupScratchDsl() so the PSRAM block is reclaimed.
+static PatternRef s_scratch_dsl{};   // valid iff .table != nullptr
+static bool       s_scratch_active = false;  // true iff gActivePattern points at s_scratch_dsl
+
+static void cleanupScratchDsl() {
+  if (s_scratch_dsl.table) {
+    PatternRef tmp = s_scratch_dsl;
+    dslFree(tmp);
+  }
+  s_scratch_dsl = PatternRef{};
+  s_scratch_active = false;
+}
+
+static void publish_dsl_error(const char* msg) {
+  portENTER_CRITICAL(&g_dsl_error_mux);
+  if (msg && *msg) {
+    strncpy((char*)g_dsl_error, msg, sizeof(g_dsl_error) - 1);
+    g_dsl_error[sizeof(g_dsl_error) - 1] = '\0';
+  } else {
+    g_dsl_error[0] = '\0';
+  }
+  portEXIT_CRITICAL(&g_dsl_error_mux);
+}
+
+#if !defined(SIGGEN_BACKEND_TABLE)
 static inline SignalConfig patternFromIndex(uint8_t idx, uint32_t rpmCurrent) {
   SignalConfig c{rpmCurrent, 60, 1, 2, GAP_AT_END, false};
   switch (idx) {
@@ -75,8 +193,9 @@ static inline SignalConfig patternFromIndex(uint8_t idx, uint32_t rpmCurrent) {
   }
   return c;
 }
+#endif
 
-static bool sendCtrlMsg(const CtrlMsg& msg) {
+bool sendCtrlMsg(const CtrlMsg& msg) {
   if (!gCtrlQ) {
     bumpUiMsgDropCount();
     return false;
@@ -87,6 +206,8 @@ static bool sendCtrlMsg(const CtrlMsg& msg) {
   }
   return true;
 }
+
+// --- UI → manager callbacks -------------------------------------------------
 
 static void on_ui_rpm(uint32_t rpm) {
   CtrlMsg m{};
@@ -99,9 +220,18 @@ static void on_ui_rpm(uint32_t rpm) {
 }
 
 static void on_ui_pattern(uint8_t idx) {
+  // M3.4: UI dropdown emits the builtin index directly; route through
+  // MSG_SELECT_BUILTIN on the TABLE backend, keep legacy MSG_SET_PATTERN
+  // on the LEGACY backend (5 presets only).
+#if defined(SIGGEN_BACKEND_TABLE)
+  CtrlMsg m{};
+  m.type = MSG_SELECT_BUILTIN;
+  m.payload.val = (int32_t)idx;
+#else
   CtrlMsg m{};
   m.type = MSG_SET_PATTERN;
   m.payload.val = (int32_t)idx;
+#endif
   if (!sendCtrlMsg(m)) {
     ui_show_error("Control queue full");
     ui_update_pattern(gPatternIdx);
@@ -139,24 +269,78 @@ static void on_ui_invert(bool inverted) {
   }
 }
 
+// --- Backend application helpers -------------------------------------------
+
+// Try to apply a PatternRef on the TABLE backend; preserves lastGood on
+// failure. Returns the ref pointer that is actually active after the call
+// (nullptr if rollback occurred and no previous ref was active).
+static const PatternRef* applyPatternRef(const PatternRef* ref, uint32_t rpm) {
+  if (!ref) return gActivePattern;
+  if (gGen.apply(*ref, rpm)) {
+    // Successfully switched away from whatever was active. If the prior
+    // active table was the DSL scratch (owned by the manager), release
+    // its PSRAM now to avoid leaking it.
+    if (s_scratch_active && ref != &s_scratch_dsl) {
+      cleanupScratchDsl();
+    }
+    gActivePattern = ref;
+    ui_update_channels(ref->channel_mask, gGen.getInverted());
+    return ref;
+  }
+  // Rollback to last good if we have one.
+  if (gActivePattern) {
+    (void)gGen.apply(*gActivePattern, rpm);
+  }
+  return gActivePattern;
+}
+
+// --- Manager task ----------------------------------------------------------
+
+// Loopback diagnostic message buffer polled by the LVGL UI timer (M6.2).
+// Volatile because written by managerTask (Core 1) and read by the LVGL
+// thread (Core 0). 95 chars + NUL — enough for the captureLoopbackErrorMsg
+// snprintf payload.
+volatile char g_loopback_error[96] = {0};
+
 void managerTask(void*) {
   CtrlMsg m{};
   SignalConfig lastGood = gCfg;
   uint8_t lastGoodPattern = gPatternIdx;
 
-  for (;;) {
-    if (xQueueReceive(gCtrlQ, &m, portMAX_DELAY) != pdTRUE) continue;
+  // 100 ms tick cadence for the loopback comparison loop (TODO 3 / M6.2).
+  const TickType_t tickInterval = pdMS_TO_TICKS(100);
 
+  for (;;) {
+    // Block up to one tickInterval; either dispatch a message or fall
+    // through to the periodic-maintenance section.
+    const BaseType_t got = xQueueReceive(gCtrlQ, &m, tickInterval);
+
+    if (got == pdTRUE) {
     switch (m.type) {
       case MSG_SET_RPM: {
         const uint32_t requested = (uint32_t)m.payload.val;
         const uint32_t clamped = constrain(requested, 100u, 6000u);
 
+#if defined(SIGGEN_BACKEND_TABLE)
+        if (gGen.setRpm(clamped)) {
+          gCfg.rpm = clamped;
+          g_rpm = clamped;
+          sweepSetBaseRpm(clamped);
+          (void)NvsStore::setRpm(clamped);
+          lastGood = gCfg;
+          ui_show_error("");
+          if (clamped != requested) ui_update_rpm(clamped);
+        } else {
+          ui_update_rpm(gCfg.rpm);
+          ui_show_error("Invalid RPM");
+        }
+#else
         SignalConfig next = gCfg;
         next.rpm = clamped;
-
-        if (genTX.apply(next)) {
+        if (gGenInstance.applySignalConfig(next)) {
           gCfg = next;
+          g_rpm = clamped;
+          (void)NvsStore::setRpm(clamped);
           lastGood = gCfg;
           ui_show_error("");
           if (clamped != requested) ui_update_rpm(clamped);
@@ -165,15 +349,38 @@ void managerTask(void*) {
           ui_update_rpm(gCfg.rpm);
           ui_show_error("Invalid RPM/config");
         }
+#endif
         break;
       }
 
       case MSG_SET_PATTERN: {
+        // Legacy SignalConfig-based path. Only used on WROOM (LEGACY backend).
         const uint32_t requested = (uint32_t)m.payload.val;
         const uint8_t idx = (requested > 4u) ? 4u : (uint8_t)requested;
 
+#if defined(SIGGEN_BACKEND_TABLE)
+        // Treat as MSG_SELECT_BUILTIN on the TABLE backend.
+        const PatternRef* p = PatternLibrary::builtinByIndex(idx);
+        if (p && gGen.apply(*p, gCfg.rpm)) {
+          gActivePattern = p;
+          ui_update_channels(p->channel_mask, gGen.getInverted());
+          gPatternIdx = idx;
+          if (p->name_key) {
+            strncpy(g_pattern_key, p->name_key, sizeof(g_pattern_key) - 1);
+            g_pattern_key[sizeof(g_pattern_key) - 1] = '\0';
+            (void)NvsStore::setPatternKey(p->name_key);
+          }
+          lastGood = gCfg;
+          lastGoodPattern = gPatternIdx;
+          ui_show_error("");
+          if (idx != requested) ui_update_pattern(idx);
+        } else {
+          ui_update_pattern(gPatternIdx);
+          ui_show_error("Pattern apply failed");
+        }
+#else
         const SignalConfig next = patternFromIndex(idx, gCfg.rpm);
-        if (genTX.apply(next)) {
+        if (gGenInstance.applySignalConfig(next)) {
           gCfg = next;
           gPatternIdx = idx;
           lastGood = gCfg;
@@ -187,6 +394,7 @@ void managerTask(void*) {
           ui_update_pattern(gPatternIdx);
           ui_show_error("Invalid pattern/config");
         }
+#endif
         break;
       }
 
@@ -194,7 +402,33 @@ void managerTask(void*) {
         SignalConfig next = m.payload.cfg;
         next.rpm = constrain(next.rpm, 100u, 6000u);
 
-        if (genTX.apply(next)) {
+#if defined(SIGGEN_BACKEND_TABLE)
+        // M5.5: route through DSL compiler to obtain a PatternRef.
+        DslResult r = dslCompileSignalConfig(next);
+        if (r.ok) {
+          if (gGen.apply(r.pattern, next.rpm)) {
+            // The custom-modal compile becomes the new DSL scratch. Free
+            // any previously-owned scratch before publishing this one to
+            // avoid leaking the prior PSRAM table.
+            cleanupScratchDsl();
+            s_scratch_dsl   = r.pattern;
+            s_scratch_active = true;
+            gActivePattern  = nullptr;  // Custom DSL pattern, not in PatternLibrary.
+            gCfg = next;
+            lastGood = gCfg;
+            ui_show_error("");
+            ui_update_rpm(gCfg.rpm);
+          } else {
+            dslFree(r.pattern);
+            ui_show_error("Custom apply failed");
+          }
+        } else {
+          char buf[128];
+          snprintf(buf, sizeof(buf), "DSL: %s", r.error);
+          ui_show_error(buf);
+        }
+#else
+        if (gGenInstance.applySignalConfig(next)) {
           gCfg = next;
           lastGood = gCfg;
           ui_show_error("");
@@ -205,30 +439,268 @@ void managerTask(void*) {
           ui_update_pattern(gPatternIdx);
           ui_show_error("Invalid custom config");
         }
+#endif
         break;
       }
 
       case MSG_START:
-        genTX.start();
+        gGen.start();
         gRunning = true;
         ui_update_running(true);
         break;
 
       case MSG_STOP:
-        genTX.stop();
+        gGen.stop();
         gRunning = false;
         ui_update_running(false);
         break;
 
       case MSG_SET_INVERT: {
         const bool requested = (m.payload.val != 0);
-        genTX.setInverted(requested);
-        gInverted = requested;
+        gGen.setInverted(requested ? 0x01u : 0x00u);
+        gInverted = ((gGen.getInverted() & 0x01u) != 0);
+        g_invert_mask = gGen.getInverted();
+        (void)NvsStore::setInvertMask(g_invert_mask);
         ui_update_inverted(gInverted);
         ui_show_error("");
         break;
       }
+
+      // ------------------------------------------------------------------
+      // M3.4 — string-keyed pattern selection (TABLE backend).
+      // ------------------------------------------------------------------
+      case MSG_SELECT_BUILTIN: {
+        const size_t idx = (size_t)(uint32_t)m.payload.val;
+        const PatternRef* p = PatternLibrary::builtinByIndex(idx);
+        if (!p) {
+          ui_show_error("Bad builtin index");
+          break;
+        }
+        const PatternRef* applied = applyPatternRef(p, gCfg.rpm);
+        if (applied == p) {
+          gPatternIdx = (uint8_t)idx;
+          if (p->name_key) {
+            strncpy(g_pattern_key, p->name_key, sizeof(g_pattern_key) - 1);
+            g_pattern_key[sizeof(g_pattern_key) - 1] = '\0';
+            (void)NvsStore::setPatternKey(p->name_key);
+          }
+          lastGoodPattern = gPatternIdx;
+          ui_show_error("");
+          ui_update_pattern(gPatternIdx);
+        } else {
+          ui_update_pattern(gPatternIdx);
+          ui_show_error("Pattern apply failed");
+        }
+        break;
+      }
+
+      case MSG_SELECT_NAMED: {
+        const char* key = m.payload.name;
+        if (!key) break;
+        const PatternRef* p = PatternLibrary::findByKey(key);
+        if (!p) {
+          ui_show_error("Unknown pattern key");
+          break;
+        }
+        const PatternRef* applied = applyPatternRef(p, gCfg.rpm);
+        if (applied == p) {
+          if (p->name_key) {
+            strncpy(g_pattern_key, p->name_key, sizeof(g_pattern_key) - 1);
+            g_pattern_key[sizeof(g_pattern_key) - 1] = '\0';
+            (void)NvsStore::setPatternKey(p->name_key);
+          }
+          ui_show_error("");
+        } else {
+          ui_show_error("Pattern apply failed");
+        }
+        // name was heap-allocated by sender; manager frees here.
+        // (Senders that pass a static .rodata literal should NOT use this
+        //  msg type; use MSG_SELECT_BUILTIN or pass through the heap path.)
+        // For safety we DO NOT free here — the convention is .rodata literals.
+        break;
+      }
+
+      case MSG_LOAD_DSL: {
+        const char* src = m.payload.name;
+        if (!src) { publish_dsl_error("Empty DSL source"); break; }
+        DslResult r = dslCompile(src);
+        if (r.ok) {
+          if (gGen.apply(r.pattern, gCfg.rpm)) {
+            // Manager owns the PSRAM table now; track via PatternLibrary
+            // under a transient key so it survives until next overwrite.
+            (void)PatternLibrary::unregisterUser("scratch_dsl");
+            // Free the prior scratch table (TODO 2) before publishing the
+            // new one. cleanupScratchDsl() is also called by applyPatternRef
+            // when the user swaps to a builtin.
+            cleanupScratchDsl();
+            r.pattern.name_key = "scratch_dsl";
+            (void)PatternLibrary::registerUserPattern("scratch_dsl", r.pattern);
+            s_scratch_dsl   = r.pattern;
+            s_scratch_active = true;
+            gActivePattern = PatternLibrary::findByKey("scratch_dsl");
+            publish_dsl_error("");
+            ui_show_error("");
+          } else {
+            dslFree(r.pattern);
+            publish_dsl_error("DSL apply failed");
+          }
+        } else {
+          char buf[128];
+          snprintf(buf, sizeof(buf), "%s @%u", r.error, (unsigned)r.error_offset);
+          publish_dsl_error(buf);
+        }
+        // Free the heap-owned DSL source string passed from sender.
+        free((void*)src);
+        break;
+      }
+
+      case MSG_LOAD_TABLE: {
+        // Build a PatternRef in-place from raw bytes. Bytes pointer must
+        // be lifetime-managed by the sender (e.g. captured buffer in PSRAM
+        // tracked by CaptureRecorder).
+        PatternRef ref{};
+        ref.table        = m.payload.raw.bytes;
+        ref.slot_count   = m.payload.raw.len;
+        ref.degrees      = m.payload.raw.degrees ? m.payload.raw.degrees : 360;
+        ref.rpm_scaler   = (float)ref.slot_count / 120.0f;
+        ref.channel_mask = 0x01;  // capture is single-channel
+        ref.name_key     = "loaded_table";
+        if (gGen.apply(ref, gCfg.rpm)) {
+          gActivePattern = nullptr;
+          ui_show_error("");
+        } else {
+          ui_show_error("Table apply failed");
+        }
+        break;
+      }
+
+      case MSG_SET_SWEEP: {
+        SweepConfig cfg{};
+        cfg.low_rpm        = m.payload.sweep.low_rpm;
+        cfg.high_rpm       = m.payload.sweep.high_rpm;
+        cfg.mode           = (SweepMode)m.payload.sweep.mode;
+        cfg.interval_us    = m.payload.sweep.interval_us;
+        cfg.waypoints      = nullptr;
+        cfg.waypoint_count = 0;
+        sweepSet(cfg);
+        g_sweep_low_rpm     = cfg.low_rpm;
+        g_sweep_high_rpm    = cfg.high_rpm;
+        g_sweep_mode        = (uint8_t)cfg.mode;
+        g_sweep_interval_us = cfg.interval_us;
+        (void)NvsStore::setSweep(cfg.low_rpm, cfg.high_rpm,
+                                 (uint8_t)cfg.mode, cfg.interval_us);
+        ui_show_error("");
+        break;
+      }
+
+      case MSG_SET_COMPRESSION: {
+        CompressionConfig c{};
+        c.enabled    = m.payload.comp.enabled;
+        c.cyl        = m.payload.comp.cyl;
+        c.rpm_thresh = m.payload.comp.rpm_thresh;
+        c.peak       = m.payload.comp.peak;
+        c.dynamic    = m.payload.comp.dynamic;
+        c.offset_deg = 0;
+        c.custom_curve_256 = nullptr;
+        compressionSet(c);
+        g_comp_enabled    = c.enabled;
+        g_comp_cyl        = c.cyl;
+        g_comp_rpm_thresh = c.rpm_thresh;
+        g_comp_peak       = c.peak;
+        g_comp_dynamic    = c.dynamic;
+        (void)NvsStore::setCompression(c.enabled, c.cyl, c.rpm_thresh,
+                                        c.peak, c.dynamic);
+        ui_show_error("");
+        break;
+      }
+
+      case MSG_CAPTURE_START: {
+        const uint16_t revs = (uint16_t)((uint32_t)m.payload.val ? (uint32_t)m.payload.val : 2u);
+        if (!captureStart(PIN_CAPTURE_IN, revs)) {
+          ui_show_error("Capture start failed");
+        } else {
+          ui_show_error("");
+        }
+        break;
+      }
+
+      case MSG_CAPTURE_STOP: {
+        PatternRef captured{};
+        if (captureFetchPattern(captured)) {
+          // Register under timestamped key. Use a static buffer per slot —
+          // PatternLibrary stores by value but the key must outlive
+          // registration; reserve a small ring of buffers.
+          static char s_cap_keys[4][32];
+          static uint8_t s_cap_idx = 0;
+          snprintf(s_cap_keys[s_cap_idx], sizeof(s_cap_keys[0]),
+                   "captured_%lu", (unsigned long)millis());
+          const char* key = s_cap_keys[s_cap_idx];
+          s_cap_idx = (s_cap_idx + 1) % 4;
+          captured.name_key = key;
+          (void)PatternLibrary::registerUserPattern(key, captured);
+          ui_show_error("");
+        } else {
+          ui_show_error("No capture data");
+        }
+        break;
+      }
+
+      case MSG_SAVE_USER: {
+        // Payload carries BOTH the target key and the DSL source
+        // (heap-owned by sender; manager frees both after consuming).
+        const char* name = m.payload.save.name;
+        const char* dsl  = m.payload.save.dsl_source;
+        if (!name) {
+          // No name → nothing to save. Free whatever source slipped through.
+          if (dsl) free((void*)dsl);
+          break;
+        }
+        if (dsl && dsl[0] != '\0') {
+          // Preferred path: caller (DSL editor) supplied the canonical source.
+          if (!PatternStorage::saveDsl(name, dsl)) {
+            ui_show_error("Save failed");
+          } else {
+            ui_show_error("");
+          }
+        } else if (gActivePattern) {
+          // Fallback (serial CLI path with no source on hand): write a
+          // minimal placeholder DSL that references the active key. This
+          // is best-effort — a real round-trip requires the source.
+          char placeholder[96];
+          snprintf(placeholder, sizeof(placeholder),
+                   "// saved alias of %s\n", gActivePattern->name_key
+                                              ? gActivePattern->name_key
+                                              : "(active)");
+          (void)PatternStorage::saveDsl(name, placeholder);
+        }
+        free((void*)name);
+        if (dsl) free((void*)dsl);
+        break;
+      }
+    }  // switch (m.type)
+    }  // if (got == pdTRUE)
+
+    // ---- Periodic maintenance (runs once per tickInterval) ----
+    //
+    // Loopback validator (TODO 3 / M6.2): on each tick, compare the most
+    // recent captured edge deltas against the expected pattern's slot
+    // period at the live RPM. Sticky error → publish to the UI via the
+    // g_loopback_error volatile buffer (polled by LVGL timer).
+    captureLoopbackTick(g_rpm);
+    if (captureLoopbackHasError()) {
+      const char* msg = captureLoopbackErrorMsg();
+      if (msg && *msg) {
+        // Lock-free volatile copy; LVGL reader tolerates partial updates
+        // because we only publish complete NUL-terminated strings.
+        size_t i = 0;
+        for (; i < sizeof(g_loopback_error) - 1 && msg[i]; ++i) {
+          g_loopback_error[i] = msg[i];
+        }
+        g_loopback_error[i] = '\0';
+      }
     }
+
+    (void)lastGoodPattern;
   }
 }
 
@@ -240,9 +712,33 @@ void setup() {
   DBG_BEGIN();
   delay(250);
 
-  const bool genOk = genTX.begin(PIN_CKP_OUT);
+  // ---- LittleFS (gated on -DSIGGEN_USE_LITTLEFS=1; no-op on WROOM) ----
+  if (!initLittleFS()) {
+    DBG_PRINTLN("[FS] LittleFS mount failed");
+  }
+  if (!littleFsSmokeTest()) {
+    DBG_PRINTLN("[FS] LittleFS smoke test failed");
+  }
+
+  // ---- NVS: load globals before applying anything ----
+  if (!NvsStore::begin()) {
+    DBG_PRINTLN("[NVS] begin failed; defaults will apply");
+  }
+  NvsStore::loadAllToGlobals();
+
+  // ---- Generator init ----
+#if defined(SIGGEN_BACKEND_TABLE)
+  const bool genOk = gGen.begin(PIN_CKP_OUT, PIN_CAM1_OUT, PIN_CAM2_OUT);
+#else
+  const bool genOk = gGen.begin(PIN_CKP_OUT);
+#endif
   if (!genOk) {
-    ui_show_error("Timer init failed");
+    ui_show_error("Generator init failed");
+  }
+
+  // Sweep / compression task lives at priority 2 on Core 1.
+  if (!sweepCompressionInit(&gGen)) {
+    DBG_PRINTLN("[SWP] sweep/compression init failed");
   }
 
   const bool capOk = capRX.begin(PIN_CAPTURE_IN);
@@ -250,7 +746,8 @@ void setup() {
     DBG_PRINTLN("[CAP] queue/interrupt init failed");
   }
 
-  const bool uiOk = ui_init(on_ui_rpm, on_ui_pattern, on_ui_run, on_ui_custom, on_ui_invert);
+  const bool uiOk = ui_init(on_ui_rpm, on_ui_pattern, on_ui_run,
+                            on_ui_custom, on_ui_invert);
   if (!uiOk) {
     DBG_PRINTLN("[UI] init failed; running defaults only");
   }
@@ -259,23 +756,83 @@ void setup() {
   if (!gCtrlQ) {
     ui_show_error("Queue alloc failed");
   } else {
-    const BaseType_t ok = xTaskCreatePinnedToCore(managerTask, "managerTask", 4096, nullptr, 3, nullptr, 1);
+    const BaseType_t ok = xTaskCreatePinnedToCore(managerTask, "managerTask",
+                                                   8192, nullptr, 3, nullptr, 1);
     if (ok != pdPASS) {
       ui_show_error("Task create failed");
     }
   }
 
-  if (!genTX.apply(gCfg)) {
+  // ---- Restore last applied pattern from NVS ----
+  gCfg.rpm = g_rpm;
+#if defined(SIGGEN_BACKEND_TABLE)
+  const PatternRef* p = nullptr;
+  if (g_pattern_key[0] != '\0') {
+    p = PatternLibrary::findByKey(g_pattern_key);
+  }
+  if (!p) {
+    p = PatternLibrary::builtinByIndex(0);
+  }
+  if (p && gGen.apply(*p, gCfg.rpm)) {
+    gActivePattern = p;
+    if (p->name_key) {
+      strncpy(g_pattern_key, p->name_key, sizeof(g_pattern_key) - 1);
+      g_pattern_key[sizeof(g_pattern_key) - 1] = '\0';
+    }
+    // Try to locate index for UI sync (linear search; 64 entries max).
+    for (size_t i = 0; i < PatternLibrary::builtinCount(); ++i) {
+      if (PatternLibrary::builtinByIndex(i) == p) {
+        gPatternIdx = (uint8_t)i;
+        break;
+      }
+    }
+  } else {
+    ui_show_error("Restore pattern failed");
+  }
+#else
+  if (!gGenInstance.applySignalConfig(gCfg)) {
     ui_show_error("Default config invalid");
   }
+#endif
 
-  genTX.start();
+  // ---- Restore sweep + compression from NVS ----
+  {
+    SweepConfig sc{};
+    sc.low_rpm        = g_sweep_low_rpm;
+    sc.high_rpm       = g_sweep_high_rpm;
+    sc.mode           = (SweepMode)g_sweep_mode;
+    sc.interval_us    = g_sweep_interval_us;
+    sc.waypoints      = nullptr;
+    sc.waypoint_count = 0;
+    sweepSet(sc);
+
+    CompressionConfig cc{};
+    cc.enabled    = g_comp_enabled;
+    cc.cyl        = g_comp_cyl;
+    cc.rpm_thresh = g_comp_rpm_thresh;
+    cc.peak       = g_comp_peak;
+    cc.dynamic    = g_comp_dynamic;
+    cc.offset_deg = 0;
+    cc.custom_curve_256 = nullptr;
+    compressionSet(cc);
+  }
+
+  // ---- Restore invert mask + start ----
+  gGen.setInverted(g_invert_mask);
+  gInverted = ((g_invert_mask & 0x01u) != 0);
+
+  gGen.start();
   gRunning = true;
+
+  // ---- Serial CLI ----
+  serialCliBegin();
 
   ui_update_rpm(gCfg.rpm);
   ui_update_pattern(gPatternIdx);
   ui_update_running(true);
   ui_update_inverted(gInverted);
+  ui_update_channels(gActivePattern ? gActivePattern->channel_mask : 0x01,
+                     gGen.getInverted());
 }
 
 void loop() {
@@ -283,6 +840,8 @@ void loop() {
 
   CaptureReport r{};
   (void)capRX.fetch(r, 0);
+
+  serialCliPoll();
 
   vTaskDelay(pdMS_TO_TICKS(10));
 }

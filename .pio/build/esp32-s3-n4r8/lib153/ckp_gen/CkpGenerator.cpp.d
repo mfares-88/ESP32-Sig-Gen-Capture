@@ -168,4 +168,5 @@
  /home/mfares/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_hw_support/include/hal/cpu_ll.h \
  /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/freertos_stats.h \
  /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
- /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h
+ /home/mfares/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
+ lib/ckp_gen/PatternRef.h
