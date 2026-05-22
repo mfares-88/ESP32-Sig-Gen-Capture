@@ -1,15 +1,19 @@
 # ESP32 Signal Generator — Current State
 
-> **Generated:** 2026-05-20
+> **Generated:** 2026-05-22 (Implementation-2 remediation pass)
+> **Previous snapshot:** 2026-05-20 (preserved below in §11)
 > **Branch:** Integrate-Ardu-Sim
-> **Implementation plan:** `_Plans-and-Records/implementation_plan.md`
-> **Orchestration:** 5-agent parallel execution (A: gen-backend, B: pattern-lib, C: sweep-store, D: dsl-compiler, E: ui-io)
+> **Implementation plans:** `_Plans-and-Records/implementation_plan.md` (original), `_Plans-and-Records/implementation-2_plan.md` (review remediation)
+> **Driver document:** `_Plans-and-Records/implementation-1_Review.md`
+> **Orchestration:** 5-agent parallel model standing; Implementation-2 engaged A, C, E (B and D not needed this cycle)
 
 ---
 
 ## 1. Executive Summary
 
-The project has advanced from "5 algorithmic patterns / 1 channel / no sweep/compression/DSL/persistence" to a **strict-superset of the Ardu-Stim feature set** running on ESP32:
+**Implementation-2 status (2026-05-22):** After first bench bring-up, a review (`implementation-1_Review.md`) found 12 defects. A 3-agent remediation pass (A / C / E) has landed: backend interface now returns `bool`+`GenError`, output pins are validated against an ESP32-S3 + JC4827W543 reserved set, a 24 KB internal DRAM playback buffer makes the ISR cache-safe during NVS / LittleFS writes, the main LVGL screen has been rebuilt on a 480×272 left/right-pane layout with no overlap, RPM arc events are coalesced (50 ms / on release), NVS RPM writes are debounced (750 ms), the LittleFS partition warning is gone, LVGL is pinned to `9.2.2` and GFX Library to `1.6.4`, a custom board manifest declares N4R8 (4 MB flash / 8 MB OPI PSRAM), and the generator is wired in **crank-only bring-up** behind a high-visibility `USER: SELECT BACKEND OUTPUT PINS` banner so the user can pick safe cam pins post-bench. Build is clean (0 warnings, RAM 31%, Flash 20%). Bench verification of the visible behavior is the next step.
+
+**Original (2026-05-20) summary:** The project has advanced from "5 algorithmic patterns / 1 channel / no sweep/compression/DSL/persistence" to a **strict-superset of the Ardu-Stim feature set** running on ESP32:
 
 - ✅ **Native 3-channel byte-table backend** (`TableCkpGenerator`) using ESP-IDF `gptimer` (1 µs tick) + `dedic_gpio` bundle, ISR ≤ 5 statements.
 - ✅ **64 patterns ported** from `References/wheel_defs.h` via reproducible converter; byte-equivalent.
@@ -63,6 +67,21 @@ The S3 (`esp32-s3-n4r8`) target carries the full feature set. The WROOM-32D targ
 | **M8** | LCD_CAM backend | ⏭ Deferred | Gated on M4 profiling per plan §4 |
 | **M9.1** | Legacy serial parity | ✅ Complete | All 13 opcodes; `r` HI-LO byte order (cite `comms.cpp:128-130`); `c`/`C` config-table migration partial — emits defaults |
 | **M9.2** | Text protocol | ✅ Complete | LIST/SELECT/COMPILE/SAVE/LOAD/DELETE/CAPTURE/SWEEP/COMP/RPM; `isalpha + space` detection rule |
+| **R1.1** | Backend bool-return + GenError contract | ✅ Complete | `IGenerator::start/stop` return `bool`; `lastError()`/`isReady()` virtuals; UI shows specific failure strings instead of generic `Pattern apply failed` |
+| **R1.2** | ESP32-S3 pin validation | ✅ Complete | `isValidEsp32S3OutputPin()` rejects S3-invalid pins, flash/PSRAM range, strapping pins, JC4827W543 board-reserved set; logs exact offending pin |
+| **R1.3** | 24 KB DRAM playback buffer | ✅ Complete | `heap_caps_malloc(MALLOC_CAP_INTERNAL)` at `begin()`; ISR reads only DRAM → cache-safe during NVS/LittleFS writes. Tunable via `kPlaybackBufferBytes` (banner-commented) |
+| **R1.4** | Crank-only bring-up | ✅ Complete | `gGen.begin(PIN_CKP_OUT, -1, -1)` wrapped in USER-SELECT-PINS banner in `src/main.cpp`. Macro values preserved for one-line user edit |
+| **R2.1** | LVGL main-screen layout rebuild | ✅ Complete | Left pane (8,32,224,224) + right pane (240,12,232,252) containers; 2×2 action grid; INVERT/START bottom row; no widget overlap on 480×272 |
+| **R2.2** | Display / touch rotation lock | ✅ Complete | `kDisplayRotation = 1` (hardcoded); auto-pick loop removed; boot Serial prints actual rotation + width/height + GT911 rotation |
+| **R2.3** | RPM arc event coalescing | ✅ Complete | `on_arc_changed` fires `s_on_rpm()` only on `LV_EVENT_RELEASED` or 50 ms throttle; local label still updates per event |
+| **R2.4** | Error label long-mode | ✅ Complete | `lbl_error` width 230, `LV_LABEL_LONG_DOT`, placed at (8,252,230,18) |
+| **R2.5** | Spin row flex layout | ✅ Complete | `make_spin_row` rewritten with `LV_FLEX_FLOW_ROW` + column gap; right-aligned absolute offsets removed |
+| **R3.1** | NVS RPM debounce | ✅ Complete | `NvsStore::setRpmDebounced/tickRpmDebounce/flushPendingRpm`; 750 ms; called from manager-task loop. Live `gGen.setRpm()` path unchanged |
+| **R3.2** | Partition / LittleFS warning fix | ✅ Complete | Partition renamed `littlefs`→`spiffs` (name matches subtype); `LittleFS.begin(..., "spiffs")`; build emits no partition warning |
+| **R3.3** | Custom board manifest + version pinning | ✅ Complete | New `boards/esp32-s3-n4r8.json` (4 MB flash / 8 MB OPI PSRAM); `lvgl@9.2.2` and `GFX Library@1.6.4` pinned exact |
+| **R3.4** | Boot diagnostics | ✅ Complete | `setup()` prints flash size, PSRAM size, free internal heap, free PSRAM, then generator init result + last error |
+
+> **R-series** milestones correspond to the 12 findings in `implementation-1_Review.md` as remediated by `implementation-2_plan.md`. Bench acceptance of these is the next gate.
 
 ---
 
@@ -127,6 +146,14 @@ The S3 (`esp32-s3-n4r8`) target carries the full feature set. The WROOM-32D targ
 7. **String-keyed pattern selection** — `name_key` is the persistent key; legacy-index migration table preserved for Ardu-Stim wire-protocol compatibility.
 8. **Dual-mode serial** — first byte alphabetic + space → text; else legacy single-byte.
 
+### Implementation-2 additions (locked 2026-05-22)
+
+9. **Backend errors are structured** — `IGenerator::start()/stop()/apply()` all surface `GenError` via `lastError()`. The UI translates these to specific human strings (`"Apply: GPIO invalid/reserved"`, `"Apply: pattern too large (>24KB)"`, etc.). Generic "Pattern apply failed" is forbidden going forward.
+10. **ISR memory contract** — `TableCkpGenerator::apply()` MUST `memcpy` pattern bytes into the internal-DRAM `_playback_buffer` before pointing `_table` at it. ISR reads from internal DRAM only. Direct `.rodata` / PSRAM pointing into `_table` is forbidden — it breaks cache safety during NVS / LittleFS writes.
+11. **Output pin choice is gated by `isValidEsp32S3OutputPin()`** — any pin offered to `gGen.begin()` is checked against the SoC valid set AND the JC4827W543 board-reserved set. A board change requires updating this allow-list, not loosening it.
+12. **Display rotation is hardcoded, not auto-picked** — `kDisplayRotation` in `ui_lvgl.cpp` is the single source of truth. Touch rotation pairs with it; both must be flipped together if the board orientation changes.
+13. **NVS commits for high-frequency UI events are debounced** — the LVGL arc / spinboxes call `NvsStore::setRpmDebounced` (and analogous helpers if added later), not raw `setRpm`. `tickRpmDebounce()` is polled from the manager task loop.
+
 ---
 
 ## 5. Hardware-Verification Tasks (Out of Scope for This Session)
@@ -142,6 +169,16 @@ The following M1.1/M1.3/M2.1/M3.5/M4.x/M5.6 exit criteria require physical hardw
 - M5.6: round-trip DSL → compile → save → reboot → load → identical scope trace
 - M9.1: existing Ardu-Stim Electron GUI drives the device unmodified
 
+### Implementation-2 bench gates (new, 2026-05-22)
+
+- **R1.1–R1.4 backend**: with `PIN_CKP_OUT` valid and cam pins `-1/-1`, pattern `sixty_minus_two` selects without error and START produces a valid 60-2 scope trace; STOP returns line low. Force `PIN_CAM1_OUT=21` and confirm UI shows `Apply: GPIO invalid/reserved` and START rejected.
+- **R1.3 ISR safety**: while generator is running, repeatedly save NVS settings and trigger a LittleFS write — scope shows no malformed pulses.
+- **R2.1 layout**: no overlapping rectangles on the main screen; INVERT and START have unique non-overlapping touch targets; pattern dropdown row taps select the touched row.
+- **R2.2 rotation**: boot Serial prints expected rotation values; tapping four screen corners produces near-corner touch coordinates. If mirrored, swap `kDisplayRotation` / `kTouchRotation` per the comment in `ui_lvgl.cpp`.
+- **R2.3 RPM coalescing**: drag the RPM arc full-range — no `Control queue full` in Serial; NVS write count is 1 per settled edit (not per arc step).
+- **R3.4 boot diagnostics**: Serial shows flash size, `psram found=1 size≈8388608`, free internal heap > 100 KB, generator init result.
+- **User action**: pick final cam GPIOs from the safe set documented in `TableCkpGenerator.cpp::isValidEsp32S3OutputPin` and edit the three lines under the `USER: SELECT BACKEND OUTPUT PINS` banner in `src/main.cpp`. Validate cam channels light their LEDs without disturbing the LCD.
+
 ---
 
 ## 6. Outstanding TODOs
@@ -151,6 +188,16 @@ The following M1.1/M1.3/M2.1/M3.5/M4.x/M5.6 exit criteria require physical hardw
 3. **M3.6 final legacy delete** — `TimerCkpGenerator` retained as `!SIGGEN_BACKEND_TABLE` fallback. Safe to remove once hardware sign-off confirms TableCkpGenerator parity AND WROOM build path is migrated.
 4. **DSL `c` rotation semantics** — Agent D flagged ambiguity: `c` overloaded for both "720° period" and "reverse rotation". Asymmetric cam patterns may flip polarity post-canonicalization. Worked-example revision recommended.
 5. **60-2 + half-moon cam DSL regression** — Agent D regression compiles to 240 bytes / 720° (correct dimensions) but does not byte-match `sixty_minus_two_with_halfmoon_cam` because the reference encodes cam transitions at specific teeth (44/43) not expressible via symmetric DSL. An angular-cam DSL form would match — left as worked-example revision.
+
+### Resolved in Implementation-2 (2026-05-22)
+
+- **Backend acknowledgement contract** — `IGenerator::start/stop` now return `bool`; `lastError()`/`isReady()` virtuals added. UI strings come from `genErrorString(GenError)` in `src/main.cpp`. Generic "Pattern apply failed" is gone.
+- **Output pin validation** — `TableCkpGenerator::isValidEsp32S3OutputPin()` rejects any pin in the JC4827W543 reserved set or outside the S3 valid GPIO range, logging the offending pin to Serial. `PIN_CAM1_OUT=21` (LCD QSPI) and `PIN_CAM2_OUT=22` (invalid on S3) are correctly rejected at runtime. `gGen.begin()` is now invoked crank-only (`-1, -1` for cam) behind a `USER: SELECT BACKEND OUTPUT PINS` banner in `src/main.cpp` — pin macros themselves remain at file scope for one-line user edit.
+- **ISR cache safety** — 24 KB internal-DRAM playback buffer allocated once at `begin()`; `apply()` `memcpy`s patterns into it; ISR reads only from DRAM. Buffer size is at `TableCkpGenerator::kPlaybackBufferBytes` and is clearly banner-commented at the allocation site for future tuning.
+- **Main screen layout** — rebuilt on a 480×272 grid with explicit left-pane and right-pane containers; no rectangle intersections; INVERT/START on their own bottom row; SWEEP/COMP/DSL/WAVE in a 2×2 grid.
+- **Display/touch rotation lock** — `pick_display_rotation()` auto-loop replaced with `kDisplayRotation = 1`; touch rotation paired and annotated; boot Serial prints rotation + width/height for ground-truth verification.
+- **RPM arc throttle + NVS debounce** — `on_arc_changed` fires only on `LV_EVENT_RELEASED` or 50 ms coalesce; `NvsStore::setRpmDebounced()` records latest and `tickRpmDebounce()` commits after 750 ms of no further changes.
+- **Build hygiene** — partition `littlefs` → `spiffs` (warning gone); `lvgl@9.2.2` and `GFX Library@1.6.4` pinned exact; new `boards/esp32-s3-n4r8.json` declares 4 MB flash + 8 MB OPI PSRAM; boot prints flash/PSRAM/heap diagnostics.
 
 ### Resolved in cleanup pass (2026-05-20)
 
@@ -172,6 +219,9 @@ The following M1.1/M1.3/M2.1/M3.5/M4.x/M5.6 exit criteria require physical hardw
 | Compiled DSL pattern (per) | 4096 B | enforced at compile-time | ✅ Validated |
 | LittleFS partition | 1 MB | 1024 KiB exact | ✅ |
 | NVS partition | 24 KB | 13 keys × ~12 B avg = ~150 B | ✅ Plenty of headroom |
+| **DRAM playback buffer (R1.3)** | — | **24,576 B fixed** | ✅ Allocated once at boot via `heap_caps_malloc(MALLOC_CAP_INTERNAL)`; tune at `TableCkpGenerator::kPlaybackBufferBytes` |
+| **Full firmware image (post-R)** | 4 MB factory | 837,203 B (Flash 20.0%) | ✅ |
+| **DIRAM / internal SRAM use (post-R)** | 320 KB usable | 159,635 B (46.7%) | ✅ Includes 24 KB playback buffer + LVGL draw buffer |
 
 ---
 
@@ -242,3 +292,29 @@ End-to-end demo at M9 acceptance:
 ---
 
 *This snapshot represents the codebase state after a single autonomous orchestration session driving 8 sub-agents across 9 milestones. Hardware sign-off, scope captures, and the M9 Electron-GUI acceptance demo remain as bench tasks per plan §9.7.*
+
+---
+
+## 10. Implementation-2 Build Validation (2026-05-22)
+
+After the A/C/E remediation pass driven by `_Plans-and-Records/implementation-2_plan.md`:
+
+| Criterion | Result |
+|---|---|
+| `pio run -e esp32-s3-n4r8` clean | ✅ SUCCESS (125.71 s) |
+| Partition warnings | ✅ None |
+| Other compiler/linker warnings | ✅ None |
+| LVGL resolved version | ✅ `lvgl @ 9.2.2` exact |
+| GFX Library resolved version | ✅ `1.6.4` exact |
+| Board metadata | ✅ Custom `esp32-s3-n4r8` (4 MB flash / 8 MB OPI PSRAM) |
+| Flash usage | ✅ 837,203 B / 4,194,304 B (20.0%) |
+| DIRAM usage | ✅ 159,635 B / 341,760 B (46.7%) |
+| IRAM usage | 100% (16,384 B) — within budget; ISR + vectors only |
+
+Next gate is bench verification per §5 (Implementation-2 bench gates).
+
+---
+
+## 11. Prior Snapshot Reference
+
+The 2026-05-20 snapshot text is preserved in this file under §1's "Original (2026-05-20) summary:" paragraph and §6 "Resolved in cleanup pass (2026-05-20)". The milestone table in §2 retains the original M-series rows unchanged and adds an R-series for Implementation-2 remediation milestones.

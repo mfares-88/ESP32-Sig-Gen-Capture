@@ -58,6 +58,15 @@ constexpr const char* kKeyCompDynamic   = "comp_dyn";
 bool s_flash_inited = false;
 bool s_ready        = false;
 
+// Debounced RPM commit state. setRpmDebounced() updates these from the
+// caller task (typically the manager task draining the LVGL command
+// queue); tickRpmDebounce() polls them. Marked volatile so a
+// hypothetical future reader on another core sees the latest snapshot —
+// access is otherwise expected from a single task.
+volatile uint32_t s_pending_rpm        = 0;
+volatile bool     s_rpm_pending        = false;
+volatile uint32_t s_rpm_last_touch_ms  = 0;
+
 // Open the namespace for read/write. Caller closes via nvs_close().
 // Returns true on success.
 bool openRw(nvs_handle_t* h) {
@@ -251,6 +260,39 @@ bool getRpm(uint32_t* out) {
     esp_err_t e = nvs_get_u32(h, kKeyRpm, out);
     nvs_close(h);
     return e == ESP_OK;
+}
+
+// ---- Debounced RPM commit (Finding 6 persistence side) -----------------
+//
+// LVGL arc events fire at ~100 Hz; committing to NVS at that rate would
+// chew through the 100k-write endurance budget and stall the manager
+// task. We coalesce: record-and-stamp on every call, commit only after
+// kRpmDebounceMs of quiet. tickRpmDebounce() is the polling site —
+// Agent E wires it into the manager task loop.
+
+void setRpmDebounced(uint32_t rpm) {
+    s_pending_rpm       = rpm;
+    s_rpm_pending       = true;
+    s_rpm_last_touch_ms = millis();
+}
+
+void tickRpmDebounce() {
+    if (!s_rpm_pending) return;
+    const uint32_t now = millis();
+    if ((now - s_rpm_last_touch_ms) >= kRpmDebounceMs) {
+        const uint32_t v = s_pending_rpm;
+        // Clear the flag first so a concurrent setRpmDebounced() during
+        // the NVS commit re-arms cleanly instead of being lost.
+        s_rpm_pending = false;
+        setRpm(v);
+    }
+}
+
+void flushPendingRpm() {
+    if (!s_rpm_pending) return;
+    const uint32_t v = s_pending_rpm;
+    s_rpm_pending = false;
+    setRpm(v);
 }
 
 bool getInvertMask(uint8_t* out) {

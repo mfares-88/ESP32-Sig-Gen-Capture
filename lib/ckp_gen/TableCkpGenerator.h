@@ -87,9 +87,11 @@ public:
   bool      setRpm(uint32_t rpm) override;
   void      setInverted(uint8_t channel_mask) override;
   uint8_t   getInverted() const override;
-  void      start() override;
-  void      stop() override;
+  bool      start() override;
+  bool      stop() override;
   uint16_t  getEdgeCounter() const override;
+  GenError  lastError() const override { return _last_error; }
+  bool      isReady() const override { return _initialized && _table != nullptr && _slot_count > 0; }
 
   // Cycle accessors (Agent C / M4.2 consumer). Naturally aligned 32-bit
   // reads on Xtensa are atomic against the ISR writer — no critical
@@ -148,4 +150,9 @@ private:
 
   bool _running;
   bool _initialized;
+
+  mutable GenError _last_error = GenError::OK;
+
+  uint8_t* _playback_buffer = nullptr;
+  static constexpr size_t kPlaybackBufferBytes = 24 * 1024;  // tune via banner in .cpp
 };

@@ -3,7 +3,9 @@
 #
 #   nvs       24 KiB  config / pattern_key / sweep / comp           (versioned schema, M3.5)
 #   app0   ~2.94 MiB  factory firmware                              (lvgl + arduino-esp32 fits)
-#   littlefs   1 MiB  /patterns/<key>.dsl + /patterns/<key>.bin     (M5.6)
+#   spiffs     1 MiB  /patterns/<key>.dsl + /patterns/<key>.bin     (M5.6)
+#                     Named 'spiffs' to match arduino-esp32 LittleFS subtype
+#                     convention (avoids gen_esp32part.py name/subtype warning).
 #
 # Math: 0x9000 + 0x6000 + 0x2F0000 + 0x100000 = 0x400000 = 4 MiB exact.
 # No otadata partition: project is not OTA-capable; this also avoids the
@@ -12,4 +14,4 @@
 # Name,     Type, SubType, Offset,    Size,       Flags
 nvs,        data, nvs,     0x9000,    0x6000,
 app0,       app,  factory, 0x10000,   0x2F0000,
-littlefs,   data, spiffs,  0x300000,  0x100000,
+spiffs,     data, spiffs,  0x300000,  0x100000,

@@ -1,6 +1,12 @@
 // lib/sweep_compression/LittleFSInit.cpp
 //
 // LittleFS bring-up (M0.3). WROOM env compiles this to no-op stubs.
+//
+// Partition-label note (Finding 9, Option A): partition is named `spiffs`
+// in partitions_signalgen.csv (subtype `spiffs`) — this is the arduino-esp32
+// LittleFS convention. Matching name and subtype suppresses the
+// gen_esp32part.py warning. We still pass the explicit label "spiffs" to
+// LittleFS.begin() for clarity.
 
 #include "LittleFSInit.h"
 
@@ -16,9 +22,10 @@ namespace {
 bool initLittleFS() {
     if (s_mounted) return true;
 
-    // begin(true) = format-on-fail. First boot after the M0.3 partition swap
-    // will hit this path and lay down a fresh filesystem.
-    if (!LittleFS.begin(true)) {
+    // begin(formatOnFail=true, basePath, maxOpenFiles, partitionLabel="spiffs")
+    // First boot after the M0.3 partition swap will hit the format-on-fail
+    // path and lay down a fresh filesystem.
+    if (!LittleFS.begin(true, "/littlefs", 10, "spiffs")) {
         Serial.println("[LittleFS] mount failed even with format-on-fail");
         return false;
     }

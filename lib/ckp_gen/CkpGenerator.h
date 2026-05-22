@@ -26,6 +26,17 @@
 
 #include "PatternRef.h"
 
+enum class GenError : uint8_t {
+  OK = 0,
+  NOT_INITIALIZED,
+  NO_TABLE,
+  BAD_SLOT_COUNT,
+  BAD_RPM,
+  TIMER_FAIL,
+  GPIO_FAIL,
+  BUFFER_OVERFLOW
+};
+
 // Position of the missing-tooth gap within a period
 enum GapPosition {
   GAP_AT_END,
@@ -65,9 +76,12 @@ struct IGenerator {
   virtual bool setRpm(uint32_t rpm) = 0;              // fast path — used in sweep
   virtual void setInverted(uint8_t channel_mask) = 0; // per-channel XOR
   virtual uint8_t getInverted() const = 0;
-  virtual void start() = 0;
-  virtual void stop() = 0;
+  virtual bool start() = 0;
+  virtual bool stop() = 0;
   virtual uint16_t getEdgeCounter() const = 0;        // atomic read for waveform cursor
+
+  virtual GenError lastError() const { return GenError::OK; }
+  virtual bool isReady() const { return false; }
 
   // Cycle-timing accessors (M4.2, Agent C consumer). Published by the byte-
   // table backend on every wrap of the active pattern — the compression
@@ -107,8 +121,8 @@ public:
   bool setRpm(uint32_t rpm) override;
   void setInverted(uint8_t channel_mask) override;
   uint8_t getInverted() const override;
-  void start() override;
-  void stop() override;
+  bool start() override;
+  bool stop() override;
   uint16_t getEdgeCounter() const override;
 
   // Backward-compatible SignalConfig entry point. main.cpp continues to

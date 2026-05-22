@@ -80,6 +80,29 @@ bool getPatternKey(char* buf, size_t buflen);
 bool setRpm(uint32_t rpm);
 bool getRpm(uint32_t* out);
 
+// Debounce window for setRpmDebounced(). Commit fires after no further
+// calls arrive for this many ms.
+static constexpr uint32_t kRpmDebounceMs = 750;
+
+// Debounced RPM commit. Records the latest value and commits to NVS
+// only after no further calls arrive for kRpmDebounceMs milliseconds.
+// Safe to call at LVGL arc event rate (~100 Hz).
+//
+// IMPORTANT: tickRpmDebounce() MUST be called periodically (every
+// 50–250 ms is fine) from a non-ISR task — the manager task loop is the
+// canonical site — otherwise no commit will ever fire. setRpmDebounced
+// itself only records state; the timer check lives in tickRpmDebounce.
+void setRpmDebounced(uint32_t rpm);
+
+// Polling helper. Call from the manager task loop. If a debounced RPM
+// write is pending and kRpmDebounceMs has elapsed since the last
+// setRpmDebounced() call, commits to NVS.
+void tickRpmDebounce();
+
+// Forces an immediate commit if a debounced write is pending. Call this
+// during shutdown / before reboot if you want to guarantee persistence.
+void flushPendingRpm();
+
 // ---- Invert mask --------------------------------------------------------
 
 bool setInvertMask(uint8_t mask);

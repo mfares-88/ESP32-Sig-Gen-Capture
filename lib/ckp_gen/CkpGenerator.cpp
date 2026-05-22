@@ -259,8 +259,8 @@ uint8_t TimerCkpGenerator::getInverted() const {
   return _invertMask;
 }
 
-void TimerCkpGenerator::start() {
-  if (!_timer) return;
+bool TimerCkpGenerator::start() {
+  if (!_timer) return true;
   portENTER_CRITICAL(&_mux);
   _pinHigh = false; _running = true;
   _slotInPeriod = 0; _gapWindow = false;
@@ -270,13 +270,15 @@ void TimerCkpGenerator::start() {
 
   timerAlarm(_timer, _slotPeriod_us, true, 0);
   CKPDBG_PRINTLN("[CKP] generator START");
+  return true;
 }
 
-void TimerCkpGenerator::stop() {
+bool TimerCkpGenerator::stop() {
   portENTER_CRITICAL(&_mux);
   _running = false; writeLow();
   portEXIT_CRITICAL(&_mux);
   CKPDBG_PRINTLN("[CKP] generator STOP");
+  return true;
 }
 
 uint16_t TimerCkpGenerator::getEdgeCounter() const {

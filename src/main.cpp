@@ -76,6 +76,20 @@
 #define PIN_CAM2_OUT       22
 #define PIN_CAPTURE_IN     18
 
+static const char* genErrorString(GenError e) {
+  switch (e) {
+    case GenError::OK:                return "";
+    case GenError::NOT_INITIALIZED:   return "Apply: generator not initialized";
+    case GenError::NO_TABLE:          return "Apply: no active pattern table";
+    case GenError::BAD_SLOT_COUNT:    return "Apply: bad slot count";
+    case GenError::BAD_RPM:           return "Apply: RPM out of range";
+    case GenError::TIMER_FAIL:        return "Apply: timer alarm failed";
+    case GenError::GPIO_FAIL:         return "Apply: GPIO invalid/reserved";
+    case GenError::BUFFER_OVERFLOW:   return "Apply: pattern too large (>24KB)";
+  }
+  return "Apply: unknown error";
+}
+
 // -------------------- Debug -------------------
 #define DEBUG 1
 #if DEBUG
@@ -326,7 +340,7 @@ void managerTask(void*) {
           gCfg.rpm = clamped;
           g_rpm = clamped;
           sweepSetBaseRpm(clamped);
-          (void)NvsStore::setRpm(clamped);
+          NvsStore::setRpmDebounced(clamped);
           lastGood = gCfg;
           ui_show_error("");
           if (clamped != requested) ui_update_rpm(clamped);
@@ -340,7 +354,7 @@ void managerTask(void*) {
         if (gGenInstance.applySignalConfig(next)) {
           gCfg = next;
           g_rpm = clamped;
-          (void)NvsStore::setRpm(clamped);
+          NvsStore::setRpmDebounced(clamped);
           lastGood = gCfg;
           ui_show_error("");
           if (clamped != requested) ui_update_rpm(clamped);
@@ -420,7 +434,8 @@ void managerTask(void*) {
             ui_update_rpm(gCfg.rpm);
           } else {
             dslFree(r.pattern);
-            ui_show_error("Custom apply failed");
+            ui_show_error(genErrorString(gGen.lastError()));
+            Serial.printf("[main] custom apply failed: %s\n", genErrorString(gGen.lastError()));
           }
         } else {
           char buf[128];
@@ -444,15 +459,25 @@ void managerTask(void*) {
       }
 
       case MSG_START:
-        gGen.start();
-        gRunning = true;
-        ui_update_running(true);
+        if (gGen.start()) {
+          gRunning = true;
+          ui_update_running(true);
+          ui_show_error("");
+        } else {
+          ui_show_error(genErrorString(gGen.lastError()));
+          Serial.printf("[main] MSG_START rejected: %s\n", genErrorString(gGen.lastError()));
+        }
         break;
 
       case MSG_STOP:
-        gGen.stop();
-        gRunning = false;
-        ui_update_running(false);
+        if (gGen.stop()) {
+          gRunning = false;
+          ui_update_running(false);
+          ui_show_error("");
+        } else {
+          ui_show_error(genErrorString(gGen.lastError()));
+          Serial.printf("[main] MSG_STOP rejected: %s\n", genErrorString(gGen.lastError()));
+        }
         break;
 
       case MSG_SET_INVERT: {
@@ -489,7 +514,8 @@ void managerTask(void*) {
           ui_update_pattern(gPatternIdx);
         } else {
           ui_update_pattern(gPatternIdx);
-          ui_show_error("Pattern apply failed");
+          ui_show_error(genErrorString(gGen.lastError()));
+          Serial.printf("[main] pattern apply failed: %s\n", genErrorString(gGen.lastError()));
         }
         break;
       }
@@ -511,7 +537,8 @@ void managerTask(void*) {
           }
           ui_show_error("");
         } else {
-          ui_show_error("Pattern apply failed");
+          ui_show_error(genErrorString(gGen.lastError()));
+          Serial.printf("[main] named pattern apply failed: %s\n", genErrorString(gGen.lastError()));
         }
         // name was heap-allocated by sender; manager frees here.
         // (Senders that pass a static .rodata literal should NOT use this
@@ -682,6 +709,10 @@ void managerTask(void*) {
 
     // ---- Periodic maintenance (runs once per tickInterval) ----
     //
+    // Debounced RPM commit (Agent C): commits the most recent setRpmDebounced()
+    // value to NVS only after kRpmDebounceMs has elapsed since the last call.
+    NvsStore::tickRpmDebounce();
+
     // Loopback validator (TODO 3 / M6.2): on each tick, compare the most
     // recent captured edge deltas against the expected pattern's slot
     // period at the live RPM. Sticky error → publish to the UI via the
@@ -712,6 +743,13 @@ void setup() {
   DBG_BEGIN();
   delay(250);
 
+  Serial.println(F("\n[boot] === ESP32-S3 Signal Generator ==="));
+  Serial.printf("[boot] flash:   %u bytes\n", (unsigned)ESP.getFlashChipSize());
+  Serial.printf("[boot] psram:   found=%d size=%u bytes\n",
+                (int)psramFound(), (unsigned)ESP.getPsramSize());
+  Serial.printf("[boot] heap:    free_internal=%u free_psram=%u\n",
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+
   // ---- LittleFS (gated on -DSIGGEN_USE_LITTLEFS=1; no-op on WROOM) ----
   if (!initLittleFS()) {
     DBG_PRINTLN("[FS] LittleFS mount failed");
@@ -728,9 +766,31 @@ void setup() {
 
   // ---- Generator init ----
 #if defined(SIGGEN_BACKEND_TABLE)
-  const bool genOk = gGen.begin(PIN_CKP_OUT, PIN_CAM1_OUT, PIN_CAM2_OUT);
+  // ============================================================
+  // ====== USER: SELECT BACKEND OUTPUT PINS ====================
+  // The current cam pin values (21, 22) are INVALID on ESP32-S3:
+  //   - GPIO 21 is owned by the LCD QSPI bus (PINS_JC4827W543.h)
+  //   - GPIO 22 is not a valid pin on the ESP32-S3 SoC
+  // The pin-validation helper in TableCkpGenerator::begin() will
+  // reject them and log the exact reason to Serial.
+  //
+  // For first bench bring-up we initialize CRANK-ONLY so the LCD
+  // and crank channel can be validated end-to-end. To add cam
+  // channels later: replace the -1 args below with valid pins
+  // chosen from the safe set in TableCkpGenerator's
+  // isValidEsp32S3OutputPin() helper.
+  // ============================================================
+  const bool genOk = gGen.begin(PIN_CKP_OUT, /*cam1=*/-1, /*cam2=*/-1);
+  Serial.printf("[boot] generator init: %s (crank pin=%d)\n",
+                genOk ? "OK" : "FAILED", (int)PIN_CKP_OUT);
+  if (!genOk) {
+    Serial.printf("[boot] generator error: %s\n",
+                  genErrorString(gGen.lastError()));
+  }
 #else
   const bool genOk = gGen.begin(PIN_CKP_OUT);
+  Serial.printf("[boot] generator init: %s (crank pin=%d)\n",
+                genOk ? "OK" : "FAILED", (int)PIN_CKP_OUT);
 #endif
   if (!genOk) {
     ui_show_error("Generator init failed");
@@ -821,8 +881,11 @@ void setup() {
   gGen.setInverted(g_invert_mask);
   gInverted = ((g_invert_mask & 0x01u) != 0);
 
-  gGen.start();
-  gRunning = true;
+  const bool startOk = gGen.start();
+  gRunning = startOk;
+  if (!startOk) {
+    Serial.printf("[boot] start failed: %s\n", genErrorString(gGen.lastError()));
+  }
 
   // ---- Serial CLI ----
   serialCliBegin();

@@ -42,10 +42,25 @@ static constexpr uint8_t  kTouchInt = TOUCH_INT;
 static constexpr uint8_t  kTouchRst = TOUCH_RES;
 static constexpr uint16_t kPanelWidth = 480;
 static constexpr uint16_t kPanelHeight = 272;
-static constexpr uint8_t  kTouchRotation = ROTATION_INVERTED;
+// Hardcoded landscape rotation. If touch and visuals are mirrored, swap to
+// ROTATION_NORMAL or ROTATION_LEFT / ROTATION_RIGHT.
+static constexpr auto    kTouchRotation = ROTATION_INVERTED;
+static constexpr uint8_t  kDisplayRotation = 1;
 static constexpr uint16_t kTouchWidth = kPanelWidth;
 static constexpr uint16_t kTouchHeight = kPanelHeight;
 static constexpr bool kArcReverse = false;
+
+// 480x272 layout constants for the main screen pane structure.
+static constexpr int SCREEN_W = 480;
+static constexpr int SCREEN_H = 272;
+static constexpr int LEFT_X = 8;
+static constexpr int LEFT_Y = 32;
+static constexpr int LEFT_W = 224;
+static constexpr int LEFT_H = 224;
+static constexpr int RIGHT_X = 240;
+static constexpr int RIGHT_Y = 12;
+static constexpr int RIGHT_W = 232;
+static constexpr int RIGHT_H = 252;
 
 TAMC_GT911 touchController(kTouchSda, kTouchScl, kTouchInt, kTouchRst, kTouchWidth, kTouchHeight);
 
@@ -293,17 +308,8 @@ static void my_touchpad_read(lv_indev_t* indev, lv_indev_data_t* data) {
 
 
 static uint8_t pick_display_rotation() {
-  const uint8_t candidates[] = {0, 1, 2, 3};
-  for (uint8_t i = 0; i < sizeof(candidates); ++i) {
-    gfx->setRotation(candidates[i]);
-    if (gfx->width() == kPanelWidth && gfx->height() == kPanelHeight) return candidates[i];
-  }
-  for (uint8_t i = 0; i < sizeof(candidates); ++i) {
-    gfx->setRotation(candidates[i]);
-    if (gfx->width() > gfx->height()) return candidates[i];
-  }
-  gfx->setRotation(0);
-  return 0;
+  gfx->setRotation(kDisplayRotation);
+  return kDisplayRotation;
 }
 
 static void init_styles() {
@@ -396,39 +402,40 @@ static void on_spin_dec(lv_event_t* e) {
 static lv_obj_t* make_spin_row(lv_obj_t* parent, const char* caption, lv_obj_t** out_spin, int32_t min, int32_t max, int32_t initial) {
   lv_obj_t* row = lv_obj_create(parent);
   lv_obj_set_size(row, lv_pct(100), 34);
+  lv_obj_set_style_pad_all(row, 0, 0);
   lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(row, 0, 0);
-  lv_obj_set_style_pad_all(row, 0, 0);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(row, 6, 0);
 
   lv_obj_t* lbl = lv_label_create(row);
   lv_label_set_text(lbl, caption);
   lv_obj_add_style(lbl, &style_caption, 0);
-  lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_set_flex_grow(lbl, 1);
+
+  lv_obj_t* btn_minus = lv_btn_create(row);
+  lv_obj_set_size(btn_minus, 32, 30);
+  lv_obj_t* lbl_minus = lv_label_create(btn_minus);
+  lv_label_set_text(lbl_minus, "-");
+  lv_obj_center(lbl_minus);
 
   lv_obj_t* spin = lv_spinbox_create(row);
   lv_spinbox_set_range(spin, min, max);
   lv_spinbox_set_value(spin, initial);
   lv_spinbox_set_digit_format(spin, 4, 0);
-  lv_obj_set_width(spin, 70);
-  lv_obj_align(spin, LV_ALIGN_RIGHT_MID, -40, 0);
-
-  lv_obj_t* btn_minus = lv_btn_create(row);
-  lv_obj_set_size(btn_minus, 32, 30);
-  lv_obj_align(btn_minus, LV_ALIGN_RIGHT_MID, -84, 0);
-  lv_obj_add_event_cb(btn_minus, on_spin_dec, LV_EVENT_CLICKED, spin);
-
-  lv_obj_t* lbl_minus = lv_label_create(btn_minus);
-  lv_label_set_text(lbl_minus, "-");
-  lv_obj_center(lbl_minus);
+  lv_obj_set_size(spin, 76, 30);
 
   lv_obj_t* btn_plus = lv_btn_create(row);
   lv_obj_set_size(btn_plus, 32, 30);
-  lv_obj_align(btn_plus, LV_ALIGN_RIGHT_MID, 0, 0);
-  lv_obj_add_event_cb(btn_plus, on_spin_inc, LV_EVENT_CLICKED, spin);
-
   lv_obj_t* lbl_plus = lv_label_create(btn_plus);
   lv_label_set_text(lbl_plus, "+");
   lv_obj_center(lbl_plus);
+
+  lv_obj_add_event_cb(btn_minus, on_spin_dec, LV_EVENT_CLICKED, spin);
+  lv_obj_add_event_cb(btn_plus,  on_spin_inc, LV_EVENT_CLICKED, spin);
 
   if (out_spin) *out_spin = spin;
   return row;
@@ -586,97 +593,20 @@ static void open_custom_panel() {
   lv_obj_center(lblApply);
 }
 
+static void style_pane(lv_obj_t* pane) {
+  lv_obj_set_style_bg_opa(pane, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(pane, 0, 0);
+  lv_obj_set_style_pad_all(pane, 0, 0);
+  lv_obj_clear_flag(pane, LV_OBJ_FLAG_SCROLLABLE);
+}
+
 static void create_main_screen() {
   screen_main = lv_screen_active();
   lv_obj_remove_style_all(screen_main);
   lv_obj_add_style(screen_main, &style_bg, 0);
+  lv_obj_clear_flag(screen_main, LV_OBJ_FLAG_SCROLLABLE);
 
-  lbl_title = lv_label_create(screen_main);
-  lv_label_set_text(lbl_title, "CKP SIGNAL");
-  lv_obj_add_style(lbl_title, &style_title, 0);
-  lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 10);
-
-  arc_rpm = lv_arc_create(screen_main);
-  lv_obj_set_size(arc_rpm, 200, 200);
-  lv_arc_set_rotation(arc_rpm, 135);
-  lv_arc_set_bg_angles(arc_rpm, 0, 270);
-  lv_arc_set_mode(arc_rpm, kArcReverse ? LV_ARC_MODE_REVERSE : LV_ARC_MODE_NORMAL);
-  lv_arc_set_range(arc_rpm, 100, 6000);
-  lv_arc_set_value(arc_rpm, 1000);
-  lv_obj_add_style(arc_rpm, &style_arc_main, LV_PART_MAIN);
-  lv_obj_add_style(arc_rpm, &style_arc_indic, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(arc_rpm, LV_OPA_TRANSP, LV_PART_KNOB);
-  lv_obj_set_style_border_width(arc_rpm, 0, LV_PART_KNOB);
-  lv_obj_add_flag(arc_rpm, LV_OBJ_FLAG_ADV_HITTEST);
-  lv_obj_align(arc_rpm, LV_ALIGN_TOP_LEFT, 20, 24);
-  lv_obj_add_event_cb(arc_rpm, on_arc_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-  lbl_rpm_value = lv_label_create(screen_main);
-  lv_obj_add_style(lbl_rpm_value, &style_value, 0);
-  lv_label_set_text(lbl_rpm_value, "1000");
-  lv_obj_align_to(lbl_rpm_value, arc_rpm, LV_ALIGN_CENTER, 0, -6);
-
-  lbl_rpm_caption = lv_label_create(screen_main);
-  lv_obj_add_style(lbl_rpm_caption, &style_caption, 0);
-  lv_label_set_text(lbl_rpm_caption, "RPM");
-  lv_obj_align_to(lbl_rpm_caption, arc_rpm, LV_ALIGN_CENTER, 0, 16);
-
-  lbl_pattern = lv_label_create(screen_main);
-  lv_obj_add_style(lbl_pattern, &style_caption, 0);
-  lv_label_set_text(lbl_pattern, "PATTERN");
-
-  dd_patterns = lv_dropdown_create(screen_main);
-  // Build the 64-pattern options string with categorical headers. The
-  // headers are non-selectable in the sense that selecting one re-routes
-  // to the first real entry below it (handled in on_pattern_changed).
-  rebuild_pattern_dropdown_options(nullptr);
-  lv_obj_set_width(dd_patterns, 200);
-  lv_obj_add_style(dd_patterns, &style_dropdown, LV_PART_MAIN);
-  lv_obj_t* list = lv_dropdown_get_list(dd_patterns);
-  if (list) {
-    lv_obj_add_style(list, &style_dropdown, LV_PART_MAIN);
-    lv_obj_set_height(list, 200);  // scrollable
-  }
-  lv_obj_align(dd_patterns, LV_ALIGN_TOP_RIGHT, -20, 24);
-  lv_obj_align_to(lbl_pattern, dd_patterns, LV_ALIGN_OUT_TOP_MID, 0, -6);
-  lv_obj_add_event_cb(dd_patterns, on_pattern_changed, LV_EVENT_VALUE_CHANGED, NULL);
-  lv_obj_add_event_cb(dd_patterns, on_pattern_open, LV_EVENT_CLICKED, NULL);
-
-  // M3.4: filter textarea below the dropdown.
-  ta_pattern_filter = lv_textarea_create(screen_main);
-  lv_textarea_set_one_line(ta_pattern_filter, true);
-  lv_textarea_set_placeholder_text(ta_pattern_filter, "filter...");
-  lv_obj_set_width(ta_pattern_filter, 200);
-  lv_obj_set_height(ta_pattern_filter, 28);
-  lv_obj_align_to(ta_pattern_filter, dd_patterns, LV_ALIGN_OUT_BOTTOM_MID, 0, 4);
-  lv_obj_add_event_cb(ta_pattern_filter, on_pattern_filter_changed,
-                      LV_EVENT_VALUE_CHANGED, NULL);
-
-  btn_run = lv_btn_create(screen_main);
-  lv_obj_set_size(btn_run, 160, 44);
-  lv_obj_align(btn_run, LV_ALIGN_BOTTOM_RIGHT, -20, -18);
-  lv_obj_add_event_cb(btn_run, on_run_clicked, LV_EVENT_CLICKED, NULL);
-
-  lbl_run = lv_label_create(btn_run);
-  lv_label_set_text(lbl_run, s_running ? "STOP" : "START");
-  lv_obj_center(lbl_run);
-
-  btn_invert = lv_btn_create(screen_main);
-  lv_obj_set_size(btn_invert, 160, 44);
-  lv_obj_align_to(btn_invert, btn_run, LV_ALIGN_OUT_TOP_MID, 0, -10);
-  lv_obj_add_event_cb(btn_invert, on_invert_clicked, LV_EVENT_CLICKED, NULL);
-
-  lbl_invert = lv_label_create(btn_invert);
-  refresh_invert_label();
-  lv_obj_center(lbl_invert);
-
-  lbl_error = lv_label_create(screen_main);
-  lv_obj_add_style(lbl_error, &style_caption, 0);
-  lv_label_set_text(lbl_error, "");
-  lv_obj_align(lbl_error, LV_ALIGN_BOTTOM_LEFT, 12, -10);
-  lv_obj_add_flag(lbl_error, LV_OBJ_FLAG_HIDDEN);
-
-  // M2.3: 3 channel-state LEDs along the top-left of the screen.
+  // Channel LEDs (top-left, on the root screen, outside panes).
   led_crank = lv_led_create(screen_main);
   lv_obj_set_size(led_crank, 14, 14);
   lv_obj_align(led_crank, LV_ALIGN_TOP_LEFT, 8, 8);
@@ -697,23 +627,122 @@ static void create_main_screen() {
   lv_led_set_brightness(led_cam2, 60);
   lv_led_on(led_cam2);
 
-  // Small action-button column: Sweep, Comp, DSL, Wave.
-  struct BtnSpec { const char* text; int y; lv_event_cb_t cb; };
-  const BtnSpec specs[] = {
-    {"SWEEP", 110, open_sweep_panel},
-    {"COMP",  142, open_comp_panel},
-    {"DSL",   174, open_dsl_panel},
-    {"WAVE",  206, open_wave_panel},
+  // Title centered at top.
+  lbl_title = lv_label_create(screen_main);
+  lv_label_set_text(lbl_title, "CKP SIGNAL");
+  lv_obj_add_style(lbl_title, &style_title, 0);
+  lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 10);
+
+  // ---- LEFT PANE: RPM arc ----
+  lv_obj_t* left_pane = lv_obj_create(screen_main);
+  lv_obj_set_pos(left_pane, LEFT_X, LEFT_Y);
+  lv_obj_set_size(left_pane, LEFT_W, LEFT_H);
+  style_pane(left_pane);
+
+  arc_rpm = lv_arc_create(left_pane);
+  lv_obj_set_size(arc_rpm, 196, 196);
+  lv_arc_set_rotation(arc_rpm, 135);
+  lv_arc_set_bg_angles(arc_rpm, 0, 270);
+  lv_arc_set_mode(arc_rpm, kArcReverse ? LV_ARC_MODE_REVERSE : LV_ARC_MODE_NORMAL);
+  lv_arc_set_range(arc_rpm, 100, 6000);
+  lv_arc_set_value(arc_rpm, 1000);
+  lv_obj_add_style(arc_rpm, &style_arc_main, LV_PART_MAIN);
+  lv_obj_add_style(arc_rpm, &style_arc_indic, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(arc_rpm, LV_OPA_TRANSP, LV_PART_KNOB);
+  lv_obj_set_style_border_width(arc_rpm, 0, LV_PART_KNOB);
+  lv_obj_add_flag(arc_rpm, LV_OBJ_FLAG_ADV_HITTEST);
+  lv_obj_align(arc_rpm, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_add_event_cb(arc_rpm, on_arc_changed, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(arc_rpm, on_arc_changed, LV_EVENT_RELEASED, NULL);
+
+  lbl_rpm_value = lv_label_create(left_pane);
+  lv_obj_add_style(lbl_rpm_value, &style_value, 0);
+  lv_label_set_text(lbl_rpm_value, "1000");
+  lv_obj_align_to(lbl_rpm_value, arc_rpm, LV_ALIGN_CENTER, 0, -6);
+
+  lbl_rpm_caption = lv_label_create(left_pane);
+  lv_obj_add_style(lbl_rpm_caption, &style_caption, 0);
+  lv_label_set_text(lbl_rpm_caption, "RPM");
+  lv_obj_align_to(lbl_rpm_caption, arc_rpm, LV_ALIGN_CENTER, 0, 16);
+
+  // ---- RIGHT PANE: controls ----
+  lv_obj_t* right_pane = lv_obj_create(screen_main);
+  lv_obj_set_pos(right_pane, RIGHT_X, RIGHT_Y);
+  lv_obj_set_size(right_pane, RIGHT_W, RIGHT_H);
+  style_pane(right_pane);
+
+  // Pattern label
+  lbl_pattern = lv_label_create(right_pane);
+  lv_obj_add_style(lbl_pattern, &style_caption, 0);
+  lv_label_set_text(lbl_pattern, "PATTERN");
+  lv_obj_set_pos(lbl_pattern, 8, 2);
+
+  // Pattern dropdown
+  dd_patterns = lv_dropdown_create(right_pane);
+  rebuild_pattern_dropdown_options(nullptr);
+  lv_obj_set_pos(dd_patterns, 8, 18);
+  lv_obj_set_size(dd_patterns, 212, 34);
+  lv_obj_add_style(dd_patterns, &style_dropdown, LV_PART_MAIN);
+  lv_obj_t* list = lv_dropdown_get_list(dd_patterns);
+  if (list) {
+    lv_obj_add_style(list, &style_dropdown, LV_PART_MAIN);
+    lv_obj_set_height(list, 200);
+  }
+  lv_obj_add_event_cb(dd_patterns, on_pattern_changed, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(dd_patterns, on_pattern_open, LV_EVENT_CLICKED, NULL);
+
+  // Filter textarea
+  ta_pattern_filter = lv_textarea_create(right_pane);
+  lv_textarea_set_one_line(ta_pattern_filter, true);
+  lv_textarea_set_placeholder_text(ta_pattern_filter, "filter...");
+  lv_obj_set_pos(ta_pattern_filter, 8, 62);
+  lv_obj_set_size(ta_pattern_filter, 212, 28);
+  lv_obj_add_event_cb(ta_pattern_filter, on_pattern_filter_changed,
+                      LV_EVENT_VALUE_CHANGED, NULL);
+
+  // 2x2 action grid: SWEEP / COMP / DSL / WAVE
+  struct BtnSpec { const char* text; int x; int y; lv_event_cb_t cb; };
+  const BtnSpec grid_specs[] = {
+    {"SWEEP",   8, 100, open_sweep_panel},
+    {"COMP",  120, 100, open_comp_panel},
+    {"DSL",     8, 142, open_dsl_panel},
+    {"WAVE",  120, 142, open_wave_panel},
   };
-  for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); ++i) {
-    lv_obj_t* b = lv_btn_create(screen_main);
-    lv_obj_set_size(b, 72, 28);
-    lv_obj_align(b, LV_ALIGN_TOP_RIGHT, -10, specs[i].y);
-    lv_obj_add_event_cb(b, specs[i].cb, LV_EVENT_CLICKED, NULL);
+  for (size_t i = 0; i < sizeof(grid_specs) / sizeof(grid_specs[0]); ++i) {
+    lv_obj_t* b = lv_btn_create(right_pane);
+    lv_obj_set_pos(b, grid_specs[i].x, grid_specs[i].y);
+    lv_obj_set_size(b, 100, 34);
+    lv_obj_add_event_cb(b, grid_specs[i].cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t* lbl = lv_label_create(b);
-    lv_label_set_text(lbl, specs[i].text);
+    lv_label_set_text(lbl, grid_specs[i].text);
     lv_obj_center(lbl);
   }
+
+  // INVERT + START/STOP bottom row
+  btn_invert = lv_btn_create(right_pane);
+  lv_obj_set_pos(btn_invert, 8, 198);
+  lv_obj_set_size(btn_invert, 100, 40);
+  lv_obj_add_event_cb(btn_invert, on_invert_clicked, LV_EVENT_CLICKED, NULL);
+  lbl_invert = lv_label_create(btn_invert);
+  refresh_invert_label();
+  lv_obj_center(lbl_invert);
+
+  btn_run = lv_btn_create(right_pane);
+  lv_obj_set_pos(btn_run, 120, 198);
+  lv_obj_set_size(btn_run, 100, 40);
+  lv_obj_add_event_cb(btn_run, on_run_clicked, LV_EVENT_CLICKED, NULL);
+  lbl_run = lv_label_create(btn_run);
+  lv_label_set_text(lbl_run, s_running ? "STOP" : "START");
+  lv_obj_center(lbl_run);
+
+  // Error label — bottom of screen, spans the left half (under the arc).
+  lbl_error = lv_label_create(screen_main);
+  lv_obj_add_style(lbl_error, &style_caption, 0);
+  lv_label_set_text(lbl_error, "");
+  lv_obj_set_pos(lbl_error, 8, 252);
+  lv_obj_set_size(lbl_error, 230, 18);
+  lv_label_set_long_mode(lbl_error, LV_LABEL_LONG_DOT);
+  lv_obj_add_flag(lbl_error, LV_OBJ_FLAG_HIDDEN);
 
   update_rpm_label(lv_arc_get_value(arc_rpm));
 }
@@ -728,8 +757,21 @@ static void on_arc_changed(lv_event_t* e) {
   lv_obj_t* arc = lv_event_get_target_obj(e);
   int32_t rpm = lv_arc_get_value(arc);
   update_rpm_label(rpm);
-  if (!s_suppress_rpm_cb && s_on_rpm) s_on_rpm((uint32_t)rpm);
+  if (s_suppress_rpm_cb || !s_on_rpm) return;
 
+  static int32_t  s_last_sent_rpm = -1;
+  static uint32_t s_last_send_ms  = 0;
+
+  const lv_event_code_t code = lv_event_get_code(e);
+  const uint32_t now_ms = millis();
+  const bool released = (code == LV_EVENT_RELEASED);
+  const bool throttled_ok = (now_ms - s_last_send_ms) >= 50;
+
+  if (released || (throttled_ok && rpm != s_last_sent_rpm)) {
+    s_last_sent_rpm = rpm;
+    s_last_send_ms  = now_ms;
+    s_on_rpm((uint32_t)rpm);
+  }
 }
 
 static void on_pattern_changed(lv_event_t* e) {
@@ -810,16 +852,21 @@ bool ui_init(ui_on_rpm_cb on_rpm, ui_on_pattern_cb on_pattern, ui_on_run_cb on_r
     return false;
   }
 
-  const uint8_t kDisplayRotation = pick_display_rotation();
+  const uint8_t chosen_rotation = pick_display_rotation();
 
   pinMode(GFX_BL, OUTPUT);
   digitalWrite(GFX_BL, HIGH);
-  gfx->setRotation(kDisplayRotation);
+  gfx->setRotation(chosen_rotation);
   gfx->fillScreen(RGB565_BLACK);
 
   Wire.begin(kTouchSda, kTouchScl);
   touchController.begin();
   touchController.setRotation(kTouchRotation);
+
+  Serial.printf("[ui] display rotation=%u width=%d height=%d touch_rotation=%d\n",
+                (unsigned)chosen_rotation,
+                (int)gfx->width(), (int)gfx->height(),
+                (int)kTouchRotation);
 
   lv_init();
   lv_tick_set_cb(millis_cb);
